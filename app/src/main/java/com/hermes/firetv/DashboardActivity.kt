@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.os.Bundle
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
@@ -15,6 +16,7 @@ import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import com.hermes.firetv.R
 
 class DashboardActivity : AppCompatActivity() {
 
@@ -43,7 +45,7 @@ class DashboardActivity : AppCompatActivity() {
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT
             ).apply {
-                gravity = android.view.Gravity.TOP or android.view.Gravity.END
+                gravity = TOP or END
                 setMargins(24, 24, 24, 24)
             }
             setPadding(16, 16, 16, 16)
@@ -67,7 +69,7 @@ class DashboardActivity : AppCompatActivity() {
         // Triple-tap zone in bottom-right
         val tripleTapZone = View(this).apply {
             layoutParams = FrameLayout.LayoutParams(120, 120).apply {
-                gravity = android.view.Gravity.BOTTOM or android.view.Gravity.END
+                gravity = BOTTOM or END
                 setMargins(24, 24, 24, 24)
             }
             isClickable = true
