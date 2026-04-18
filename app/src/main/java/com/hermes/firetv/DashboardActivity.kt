@@ -15,16 +15,13 @@ import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import com.hermes.firetv.R
 
 class DashboardActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
     private lateinit var exitButtonContainer: FrameLayout
-    private lateinit var exitBottomRight: View
 
     private val DASHBOARD_URL = "http://2.24.198.162:8080"
-    private val TAG = "FireTVDashboard"
 
     // Track if we can go back in WebView history
     private var canGoBack = false
@@ -40,20 +37,44 @@ class DashboardActivity : AppCompatActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
 
-        setContentView(R.layout.activity_main)
-
-        // Get views from layout
-        webView = findViewById(R.id.webView)
-        exitButtonContainer = findViewById(R.id.exitButtonContainer)
-        exitBottomRight = findViewById(R.id.exitBottomRight)
-
-        // Exit Button 1: Visible X in top-right corner
-        exitButtonContainer.setOnClickListener {
-            showExitConfirmation()
+        // Build exit overlay programmatically — no XML needed
+        exitButtonContainer = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = android.view.Gravity.TOP or android.view.Gravity.END
+                setMargins(24, 24, 24, 24)
+            }
+            setPadding(16, 16, 16, 16)
+            isClickable = true
+            isFocusable = true
         }
 
-        // Exit Button 2: Triple-tap bottom-right zone
-        exitBottomRight.setOnTouchListener { _, event ->
+        val xBtn = android.widget.TextView(this).apply {
+            text = "×"
+            textSize = 32f
+            setTextColor(0xFFFFFFFF.toInt())
+            textStyle = android.graphics.Typeface.BOLD
+            gravity = android.view.Gravity.CENTER
+            layoutParams = FrameLayout.LayoutParams(64, 64)
+            setBackgroundResource(R.drawable.exit_button_bg)
+        }
+
+        exitButtonContainer.addView(xBtn)
+        exitButtonContainer.setOnClickListener { showExitConfirmation() }
+
+        // Triple-tap zone in bottom-right
+        val tripleTapZone = View(this).apply {
+            layoutParams = FrameLayout.LayoutParams(120, 120).apply {
+                gravity = android.view.Gravity.BOTTOM or android.view.Gravity.END
+                setMargins(24, 24, 24, 24)
+            }
+            isClickable = true
+            isFocusable = true
+        }
+
+        tripleTapZone.setOnTouchListener { _, event ->
             if (event.action == KeyEvent.ACTION_DOWN) {
                 val now = System.currentTimeMillis()
                 if (now - lastTapTime < 500) {
@@ -74,6 +95,23 @@ class DashboardActivity : AppCompatActivity() {
             }
         }
 
+        val root = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        webView = WebView(this)
+        webView.layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        )
+        root.addView(webView)
+        root.addView(exitButtonContainer)
+        root.addView(tripleTapZone)
+        setContentView(root)
+
         val settings: WebSettings = webView.settings
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
@@ -89,6 +127,7 @@ class DashboardActivity : AppCompatActivity() {
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 canGoBack = view?.canGoBack() == true
+                enterImmersiveMode()
             }
 
             @Suppress("DEPRECATION")
@@ -107,25 +146,9 @@ class DashboardActivity : AppCompatActivity() {
                     ).show()
                 }
             }
-
-            @Suppress("DEPRECATION")
-            override fun onReceivedHttpError(
-                view: WebView?,
-                request: android.webkit.WebResourceRequest?,
-                errorResponse: WebResourceResponse?
-            ) {
-                if (errorResponse?.statusCode == 404 || errorResponse?.statusCode == 500) {
-                    Toast.makeText(
-                        this@DashboardActivity,
-                        "Dashboard page not found (HTTP ${errorResponse.statusCode})",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
-            }
         }
 
         webView.loadUrl(DASHBOARD_URL)
-
         startService(Intent(this, KeepAwakeService::class.java))
     }
 
