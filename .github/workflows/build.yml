@@ -29,13 +29,17 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Set up Gradle
-        uses: actions/gradle@v4
-        with:
-          gradle-version: 8.4
-
       - name: Build debug APK
-        run: gradle assembleDebug --no-daemon
+        env:
+          ANDROID_HOME: /opt/android-sdk
+          ANDROID_SDK_ROOT: /opt/android-sdk
+        run: |
+          export PATH="/opt/gradle/gradle-8.4/bin:$PATH"
+          if ! command -v gradle &>/dev/null; then
+            curl -sL https://services.gradle.org/distributions/gradle-8.4-bin.zip -o /tmp/gradle.zip
+            unzip -q /tmp/gradle.zip -d /opt/
+          fi
+          gradle assembleDebug --no-daemon
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
