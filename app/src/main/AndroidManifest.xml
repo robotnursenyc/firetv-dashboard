@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Battery life exemption for screen wake lock on Fire TV -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
         android:allowBackup="true"
@@ -22,10 +24,15 @@
             android:configChanges="orientation|screenSize|keyboard|keyboardHidden"
             android:exported="true"
             android:screenOrientation="landscape"
-            android:theme="@style/Theme.FireTVDashboard">
+            android:theme="@style/Theme.FireTVDashboard"
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Allow this activity to be launched by the notification stop action -->
+            <intent-filter>
+                <action android:name="com.hermes.firetv.STOP" />
             </intent-filter>
         </activity>
 
@@ -37,5 +44,6 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="keep_screen_alive" />
         </service>
+
     </application>
 </manifest>
