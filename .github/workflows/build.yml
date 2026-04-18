@@ -1,9 +1,15 @@
 name: Build Android APK
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v1.0)'
+        required: false
+        default: 'v1.0-debug'
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -37,9 +43,14 @@ jobs:
           build-root-directory: app
           arguments: assembleDebug --no-daemon
 
-      - name: Upload debug APK
-        if: success()
-        uses: actions/upload-artifact@v4
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v1
         with:
-          name: firetv-dashboard-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          tag_name: ${{ inputs.version || 'v1.0-debug' }}
+          release_name: "Fire TV Dashboard ${{ inputs.version || 'v1.0-debug' }}"
+          files: app/build/outputs/apk/debug/app-debug.apk
+          draft: false
+          prerelease: false
+          overwrite: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
