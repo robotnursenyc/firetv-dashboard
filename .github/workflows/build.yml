@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version'
+        required: false
+        default: 'v1.0-debug'
 
 permissions:
   contents: write
@@ -25,25 +30,20 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install required SDK components
-        run: |
-          export ANDROID_HOME=/opt/android-sdk
-          export ANDROID_SDK_ROOT=/opt/android-sdk
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install \
-            "platforms;android-34" \
-            "build-tools;34.0.0"
-
-      - name: Download Gradle
-        run: |
-          curl -sL https://services.gradle.org/distributions/gradle-8.4-bin.zip -o /tmp/gradle.zip
-          unzip -qo /tmp/gradle.zip -d /opt/
-          echo "/opt/gradle-8.4/bin" >> $GITHUB_PATH
+      - name: Set up Gradle
+        uses: gradle/gradle-build-action@v3
+        with:
+          gradle-version: 8.4
 
       - name: Build APK
         run: |
           export ANDROID_HOME=/opt/android-sdk
           export ANDROID_SDK_ROOT=/opt/android-sdk
-          gradle --version
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "Listing SDK contents:"
+          ls $ANDROID_HOME/cmdline-tools/latest/bin/ 2>/dev/null || ls $ANDROID_HOME/tools/bin/ 2>/dev/null || echo "checking other paths"
+          find $ANDROID_HOME -name "sdkmanager" 2>/dev/null | head -3
+          echo "---"
           cd app
           gradle assembleDebug --no-daemon --stacktrace 2>&1
 
