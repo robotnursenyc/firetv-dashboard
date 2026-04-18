@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
@@ -31,19 +31,21 @@ jobs:
           export ANDROID_SDK_ROOT=/opt/android-sdk
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install \
             "platforms;android-34" \
-            "build-tools;34.0.0" 2>&1 | tail -5
+            "build-tools;34.0.0"
+
+      - name: Download Gradle
+        run: |
+          wget -q https://services.gradle.org/distributions/gradle-8.4-bin.zip -O /tmp/gradle.zip
+          unzip -qo /tmp/gradle.zip -d /opt/
+          echo "/opt/gradle-8.4/bin" >> $GITHUB_PATH
 
       - name: Build APK
-        uses: gradle/gradle-build-action@v3
-        with:
-          gradle-version: 8.4
-          build-root-directory: app
-          arguments: assembleDebug --no-daemon
-
-      - name: Show APK
         run: |
-          find app/build -name "*.apk" -type f 2>/dev/null || echo "No APK found"
-          ls -la app/build/outputs/apk/debug/ 2>/dev/null || echo "APK dir missing"
+          export ANDROID_HOME=/opt/android-sdk
+          export ANDROID_SDK_ROOT=/opt/android-sdk
+          gradle --version
+          cd app
+          gradle assembleDebug --no-daemon --stacktrace 2>&1
 
       - name: Upload to Release
         if: success()

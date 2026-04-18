@@ -1,14 +1,13 @@
 package com.hermes.firetv
 
 import android.annotation.SuppressLint
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.os.Bundle
-import android.util.Log
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
 import android.webkit.WebChromeClient
-import android.webkit.WebResourceError
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -16,6 +15,7 @@ import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import com.hermes.firetv.R
 
 class DashboardActivity : AppCompatActivity() {
 
@@ -29,18 +29,20 @@ class DashboardActivity : AppCompatActivity() {
     // Track if we can go back in WebView history
     private var canGoBack = false
 
+    // Triple-tap state
+    private var tapCount = 0
+    private var lastTapTime = 0L
+
     @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
 
-        // Keep screen always on — this is more reliable than a service on Fire TV
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
-        // Lock to landscape for TV display
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
 
-        // Wire up views
+        setContentView(R.layout.activity_main)
+
+        // Get views from layout
         webView = findViewById(R.id.webView)
         exitButtonContainer = findViewById(R.id.exitButtonContainer)
         exitBottomRight = findViewById(R.id.exitBottomRight)
@@ -50,9 +52,7 @@ class DashboardActivity : AppCompatActivity() {
             showExitConfirmation()
         }
 
-        // Exit Button 2: Invisible bottom-right touch target (triple-tap zone)
-        var tapCount = 0
-        var lastTapTime = 0L
+        // Exit Button 2: Triple-tap bottom-right zone
         exitBottomRight.setOnTouchListener { _, event ->
             if (event.action == KeyEvent.ACTION_DOWN) {
                 val now = System.currentTimeMillis()
@@ -74,7 +74,6 @@ class DashboardActivity : AppCompatActivity() {
             }
         }
 
-        // Configure WebView
         val settings: WebSettings = webView.settings
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
@@ -85,58 +84,54 @@ class DashboardActivity : AppCompatActivity() {
         settings.allowContentAccess = false
         webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
 
-        webView.webChromeClient = object : WebChromeClient() {
-            override fun onReceivedTitle(view: WebView?, title: String?) {
-                Log.d(TAG, "Page title: $title")
-            }
-        }
+        webView.webChromeClient = object : WebChromeClient() {}
 
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 canGoBack = view?.canGoBack() == true
-                Log.d(TAG, "Page loaded: $url")
             }
 
+            @Suppress("DEPRECATION")
             override fun onReceivedError(
                 view: WebView?,
                 errorCode: Int,
                 description: String?,
                 failingUrl: String?
             ) {
-                Log.e(TAG, "WebView error $errorCode: $description — $failingUrl")
                 if (errorCode == WebViewClient.ERROR_HOST_LOOKUP ||
                     errorCode == WebViewClient.ERROR_CONNECT) {
-                    showConnectionError()
+                    Toast.makeText(
+                        this@DashboardActivity,
+                        "Cannot reach dashboard at $DASHBOARD_URL — check connection",
+                        Toast.LENGTH_LONG
+                    ).show()
                 }
             }
 
-            override fun onReceivedError(
+            @Suppress("DEPRECATION")
+            override fun onReceivedHttpError(
                 view: WebView?,
                 request: android.webkit.WebResourceRequest?,
-                error: WebResourceError?
+                errorResponse: WebResourceResponse?
             ) {
-                // Only handle main frame errors, not subresource errors
-                if (request?.isForMainFrame == true) {
-                    Log.e(TAG, "Main frame error: ${error?.description}")
-                    showConnectionError()
+                if (errorResponse?.statusCode == 404 || errorResponse?.statusCode == 500) {
+                    Toast.makeText(
+                        this@DashboardActivity,
+                        "Dashboard page not found (HTTP ${errorResponse.statusCode})",
+                        Toast.LENGTH_LONG
+                    ).show()
                 }
             }
         }
 
         webView.loadUrl(DASHBOARD_URL)
 
-        // Start foreground service to keep screen awake across activity lifecycle
         startService(Intent(this, KeepAwakeService::class.java))
     }
 
     override fun onResume() {
         super.onResume()
         enterImmersiveMode()
-    }
-
-    override fun onPause() {
-        super.onPause()
-        // Don't release — keep screen awake while app is in foreground
     }
 
     private fun enterImmersiveMode() {
@@ -152,7 +147,6 @@ class DashboardActivity : AppCompatActivity() {
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         return when (keyCode) {
-            // Back button: if WebView can go back, go back; otherwise show exit
             KeyEvent.KEYCODE_BACK -> {
                 if (canGoBack) {
                     webView.goBack()
@@ -162,12 +156,10 @@ class DashboardActivity : AppCompatActivity() {
                     true
                 }
             }
-            // Home button: exit immediately
             KeyEvent.KEYCODE_HOME -> {
                 finish()
                 true
             }
-            // Remote control: re-enter immersive on any key
             else -> {
                 enterImmersiveMode()
                 super.onKeyDown(keyCode, event)
@@ -176,7 +168,6 @@ class DashboardActivity : AppCompatActivity() {
     }
 
     private fun showExitConfirmation() {
-        // Quick flash of the X button to give tactile feedback before dialog
         exitButtonContainer.alpha = 0.3f
         exitButtonContainer.animate().alpha(1f).setDuration(200).start()
 
@@ -190,16 +181,6 @@ class DashboardActivity : AppCompatActivity() {
             }
             .setOnDismissListener { enterImmersiveMode() }
             .show()
-    }
-
-    private fun showConnectionError() {
-        runOnUiThread {
-            Toast.makeText(
-                this,
-                "Cannot reach dashboard at $DASHBOARD_URL — check connection",
-                Toast.LENGTH_LONG
-            ).show()
-        }
     }
 
     override fun onDestroy() {
