@@ -26,20 +26,19 @@ jobs:
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle.kts') }}
           restore-keys: ${{ runner.os }}-gradle-
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Install Gradle
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gradle > /dev/null 2>&1
+          gradle --version
 
       - name: Build debug APK
         env:
-          ANDROID_HOME: /opt/android-sdk
-          ANDROID_SDK_ROOT: /opt/android-sdk
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+          JAVA_HOME: /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17.0.11/x64
         run: |
-          export PATH="/opt/gradle/gradle-8.4/bin:$PATH"
-          if ! command -v gradle &>/dev/null; then
-            curl -sL https://services.gradle.org/distributions/gradle-8.4-bin.zip -o /tmp/gradle.zip
-            unzip -q /tmp/gradle.zip -d /opt/
-          fi
-          gradle assembleDebug --no-daemon
+          gradle assembleDebug --no-daemon -p app --stacktrace
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
