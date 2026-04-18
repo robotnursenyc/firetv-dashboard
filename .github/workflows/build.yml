@@ -4,18 +4,13 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Release version'
-        required: false
-        default: 'v1.0-debug'
 
 permissions:
   contents: write
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout
@@ -30,25 +25,22 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Set up Gradle
-        uses: gradle/gradle-build-action@v3
-        with:
-          gradle-version: 8.4
-
-      - name: Build APK
+      - name: Install required SDK components
         run: |
           export ANDROID_HOME=/opt/android-sdk
           export ANDROID_SDK_ROOT=/opt/android-sdk
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "Listing SDK contents:"
-          ls $ANDROID_HOME/cmdline-tools/latest/bin/ 2>/dev/null || ls $ANDROID_HOME/tools/bin/ 2>/dev/null || echo "checking other paths"
-          find $ANDROID_HOME -name "sdkmanager" 2>/dev/null | head -3
-          echo "---"
-          cd app
-          gradle assembleDebug --no-daemon --stacktrace 2>&1
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install \
+            "platforms;android-34" \
+            "build-tools;34.0.0" 2>&1 | tail -3
+
+      - name: Build APK
+        uses: gradle/gradle-build-action@v3
+        with:
+          gradle-version: 8.4
+          build-root-directory: app
+          arguments: assembleDebug --no-daemon
 
       - name: Upload to Release
-        if: success()
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ inputs.version || 'v1.0-debug' }}
@@ -58,4 +50,4 @@ jobs:
           prerelease: false
           overwrite: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}}
