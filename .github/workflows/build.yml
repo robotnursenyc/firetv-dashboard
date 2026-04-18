@@ -19,6 +19,18 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install required SDK components
+        run: |
+          export ANDROID_HOME=/opt/android-sdk
+          export ANDROID_SDK_ROOT=/opt/android-sdk
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "platform-tools" 2>&1 | tail -5
+
       - name: Cache Gradle
         uses: actions/cache@v3
         with:
@@ -26,21 +38,22 @@ jobs:
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle.kts') }}
           restore-keys: ${{ runner.os }}-gradle-
 
-      - name: Install Gradle
+      - name: Install Gradle 8.4
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq gradle > /dev/null 2>&1
-          gradle --version
+          curl -sL https://services.gradle.org/distributions/gradle-8.4-bin.zip -o /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d /opt/
+          /opt/gradle-8.4/bin/gradle --version
 
       - name: Build debug APK
         env:
-          ANDROID_HOME: /usr/local/lib/android/sdk
-          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+          ANDROID_HOME: /opt/android-sdk
+          ANDROID_SDK_ROOT: /opt/android-sdk
           JAVA_HOME: /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17.0.11/x64
         run: |
-          gradle assembleDebug --no-daemon -p app --stacktrace
+          /opt/gradle-8.4/bin/gradle assembleDebug --no-daemon -p app --stacktrace 2>&1 | tail -50
 
       - name: Upload debug APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: debug-apk
