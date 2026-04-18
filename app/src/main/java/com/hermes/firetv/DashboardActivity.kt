@@ -17,7 +17,7 @@ class DashboardActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
 
-    private val DASHBOARD_URL = "http://2.24.198.162:8080"
+    private val DASHBOARD_URL = BuildConfig.DASHBOARD_URL
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -97,7 +97,12 @@ class DashboardActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        webView.destroy()
+        webView.apply {
+            loadUrl("about:blank")
+            clearHistory()
+            clearCache(true)
+            destroy()
+        }
         super.onDestroy()
     }
 }

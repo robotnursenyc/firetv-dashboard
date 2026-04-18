@@ -5,14 +5,18 @@ plugins {
 
 android {
     namespace = "com.hermes.firetv"
-    compileSdk = 23
+    compileSdk = 34
 
     defaultConfig {
         applicationId = "com.hermes.firetv"
-        minSdk = 21
-        targetSdk = 23
+        minSdk = 25
+        targetSdk = 26
         versionCode = 1
         versionName = "1.0"
+        ndk {
+            abiFilters("armeabi-v7a", "arm64-v8a")
+        }
+        buildConfigField("String", "DASHBOARD_URL", "\"http://2.24.198.162:8080\"")
     }
 
     buildTypes {
@@ -32,6 +36,10 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 }
 
