@@ -29,18 +29,41 @@ jobs:
         run: |
           export ANDROID_HOME=/opt/android-sdk
           export ANDROID_SDK_ROOT=/opt/android-sdk
+          mkdir -p $ANDROID_HOME/cmdline-tools
+          cd $ANDROID_HOME/cmdline-tools
+          # Download command line tools if not present
+          if [ ! -d "latest" ]; then
+            wget -q "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -O cmdline-tools.zip
+            unzip -q cmdline-tools.zip
+            mv cmdline-tools latest
+            rm cmdline-tools.zip
+          fi
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install \
             "platforms;android-34" \
-            "build-tools;34.0.0" 2>&1 | tail -3
+            "build-tools;34.0.0" 2>&1 | tail -5
+
+      - name: Download and setup Gradle
+        run: |
+          export ANDROID_HOME=/opt/android-sdk
+          export ANDROID_SDK_ROOT=/opt/android-sdk
+          cd /tmp
+          if [ ! -d "gradle-8.4" ]; then
+            wget -q "https://services.gradle.org/distributions/gradle-8.4-bin.zip" -O gradle.zip
+            unzip -q gradle.zip
+          fi
+          export PATH="/tmp/gradle-8.4/bin:$PATH"
+          gradle --version
 
       - name: Build APK
-        uses: gradle/gradle-build-action@v3
-        with:
-          gradle-version: 8.4
-          build-root-directory: app
-          arguments: assembleDebug --no-daemon
+        run: |
+          export ANDROID_HOME=/opt/android-sdk
+          export ANDROID_SDK_ROOT=/opt/android-sdk
+          export PATH="/tmp/gradle-8.4/bin:$PATH"
+          cd app
+          gradle assembleDebug --no-daemon --stacktrace 2>&1 | tail -50
 
       - name: Upload to Release
+        if: success()
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ inputs.version || 'v1.0-debug' }}
@@ -50,4 +73,4 @@ jobs:
           prerelease: false
           overwrite: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
