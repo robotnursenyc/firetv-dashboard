@@ -28,33 +28,14 @@ jobs:
           export ANDROID_SDK_ROOT=/opt/android-sdk
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install \
             "platforms;android-34" \
-            "build-tools;34.0.0" \
-            "platform-tools" 2>&1 | tail -5
+            "build-tools;34.0.0" 2>&1 | tail -3
 
-      - name: Cache Gradle
-        uses: actions/cache@v3
+      - name: Build APK
+        uses: gradle/gradle-build-action@v3
         with:
-          path: ~/.gradle/caches
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle.kts') }}
-          restore-keys: ${{ runner.os }}-gradle-
-
-      - name: Install Gradle 8.4
-        run: |
-          curl -sL https://services.gradle.org/distributions/gradle-8.4-bin.zip -o /tmp/gradle.zip
-          unzip -q /tmp/gradle.zip -d /opt/
-          /opt/gradle-8.4/bin/gradle --version
-
-      - name: Build debug APK
-        env:
-          ANDROID_HOME: /opt/android-sdk
-          ANDROID_SDK_ROOT: /opt/android-sdk
-          JAVA_HOME: /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17.0.11/x64
-        run: |
-          /opt/gradle-8.4/bin/gradle assembleDebug --no-daemon -p app 2>&1
-          echo "---"
-          echo "Looking for APK files:"
-          find . -name "*.apk" -type f 2>/dev/null
-          ls -la app/build/outputs/apk/debug/ 2>/dev/null || echo "No APK dir found"
+          gradle-version: 8.4
+          build-root-directory: app
+          arguments: assembleDebug --no-daemon
 
       - name: Upload debug APK
         if: success()
