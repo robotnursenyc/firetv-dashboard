@@ -35,7 +35,7 @@ jobs:
 
       - name: Download Gradle
         run: |
-          wget -q https://services.gradle.org/distributions/gradle-8.4-bin.zip -O /tmp/gradle.zip
+          curl -sL https://services.gradle.org/distributions/gradle-8.4-bin.zip -o /tmp/gradle.zip
           unzip -qo /tmp/gradle.zip -d /opt/
           echo "/opt/gradle-8.4/bin" >> $GITHUB_PATH
 
