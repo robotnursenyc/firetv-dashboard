@@ -39,8 +39,8 @@ jobs:
             rm cmdline-tools.zip
           fi
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install \
-            "platforms;android-34" \
-            "build-tools;34.0.0" 2>&1 | tail -5
+            "platforms;android-23" \
+            "build-tools;23.0.1" 2>&1 | tail -5
 
       - name: Download and setup Gradle
         run: |

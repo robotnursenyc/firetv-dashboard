@@ -80,7 +80,7 @@ class KeepAwakeService : Service() {
         val intent = Intent(this, DashboardActivity::class.java)
         val pi = PendingIntent.getActivity(
             this, 0, intent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            PendingIntent.FLAG_UPDATE_CURRENT
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Family Dashboard")

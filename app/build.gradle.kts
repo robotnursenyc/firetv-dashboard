@@ -5,12 +5,12 @@ plugins {
 
 android {
     namespace = "com.hermes.firetv"
-    compileSdk = 26
+    compileSdk = 23
 
     defaultConfig {
         applicationId = "com.hermes.firetv"
         minSdk = 21
-        targetSdk = 26
+        targetSdk = 23
         versionCode = 1
         versionName = "1.0"
     }
