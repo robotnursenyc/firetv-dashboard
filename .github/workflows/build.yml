@@ -36,7 +36,6 @@ jobs:
           export ANDROID_SDK_ROOT=/opt/android-sdk
           mkdir -p $ANDROID_HOME/cmdline-tools
           cd $ANDROID_HOME/cmdline-tools
-          # Download command line tools if not present
           if [ ! -d "latest" ]; then
             wget -q "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -O cmdline-tools.zip
             unzip -q cmdline-tools.zip
@@ -65,8 +64,20 @@ jobs:
           export ANDROID_HOME=/opt/android-sdk
           export ANDROID_SDK_ROOT=/opt/android-sdk
           export PATH="/tmp/gradle-8.4/bin:$PATH"
-          cd app
-          gradle assembleDebug --no-daemon --stacktrace 2>&1 | tail -50
+          echo "=== BEFORE BUILD ==="
+          pwd && ls -la
+          echo "=== RUNNING GRADLE ==="
+          ./gradlew assembleDebug --no-daemon 2>&1 | tail -30
+          echo "=== APK CHECK ==="
+          find . -name "*.apk" 2>/dev/null
+
+      - name: Upload APK as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firetv-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 1
 
       - name: Upload to Release
         if: success()
@@ -80,11 +91,3 @@ jobs:
           overwrite: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload APK as artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: firetv-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
-          retention-days: 1
