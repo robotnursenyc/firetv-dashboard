@@ -52,6 +52,7 @@ jobs:
 
       - name: Build APK
         run: |
+          cd /home/runner/work/robotnursenyc/firetv-dashboard
           export ANDROID_HOME=/opt/android-sdk
           export ANDROID_SDK_ROOT=/opt/android-sdk
           export PATH="/tmp/gradle-8.4/bin:$PATH"

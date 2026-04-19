@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "com.hermes.firetv"
-    compileSdk = 26
+    compileSdk = 34
 
     defaultConfig {
         applicationId = "com.hermes.firetv"
