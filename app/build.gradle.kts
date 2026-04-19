@@ -22,6 +22,8 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            isV1SigningEnabled = true
+            isV2SigningEnabled = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
