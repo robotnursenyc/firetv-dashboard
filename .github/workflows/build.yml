@@ -72,8 +72,8 @@ jobs:
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.version || 'v1.0-debug' }}
-          name: Fire TV Dashboard ${{ inputs.version || 'v1.0-debug' }}
+          tag_name: ${{ inputs.version || 'v1.0-debug-sdk26' }}
+          name: Fire TV Dashboard ${{ inputs.version || 'v1.0-debug-sdk26' }}
           files: app/build/outputs/apk/debug/app-debug.apk
           draft: false
           prerelease: false
