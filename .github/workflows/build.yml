@@ -70,25 +70,4 @@ jobs:
         with:
           name: firetv-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
-          retention-days: 1
-
-      - name: Delete existing release if exists
-        if: success()
-        run: |
-          TAG="${{ inputs.version || 'v1.0-debug-sdk26' }}"
-          if gh release view "$TAG" --repo robotnursenyc/firetv-dashboard >/dev/null 2>&1; then
-            gh release delete "$TAG" --yes --repo robotnursenyc/firetv-dashboard
-            git push --delete origin "$TAG" 2>/dev/null || true
-          fi
-
-      - name: Upload to Release
-        if: success()
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ inputs.version || 'v1.0-debug-sdk26' }}
-          name: Fire TV Dashboard ${{ inputs.version || 'v1.0-debug-sdk26' }}
-          files: app/build/outputs/apk/debug/app-debug.apk
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          retention-days: 30
