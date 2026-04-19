@@ -58,7 +58,6 @@ jobs:
 
       - name: Build APK
         run: |
-          cd /home/runner/work/robotnursenyc/firetv-dashboard
           export ANDROID_HOME=/opt/android-sdk
           export ANDROID_SDK_ROOT=/opt/android-sdk
           export PATH="/tmp/gradle-8.4/bin:$PATH"
@@ -66,7 +65,7 @@ jobs:
           pwd && ls -la
           echo "=== RUNNING GRADLE ==="
           gradle --version
-          gradle assembleDebug --no-daemon 2>&1 | tail -40
+          gradle assembleDebug --no-daemon --stacktrace 2>&1 | tail -60
           echo "=== APK CHECK ==="
           ls -la app/build/outputs/apk/debug/ 2>/dev/null || echo "APK DIR NOT FOUND"
           find . -name "*.apk" 2>/dev/null
