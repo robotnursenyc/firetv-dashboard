@@ -25,7 +25,7 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install required SDK components
+      - name: Accept Android SDK licenses
         run: |
           export ANDROID_HOME=/opt/android-sdk
           export ANDROID_SDK_ROOT=/opt/android-sdk
@@ -37,7 +37,13 @@ jobs:
             mv cmdline-tools latest
             rm cmdline-tools.zip
           fi
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install \
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses 2>&1 | tail -3
+
+      - name: Install required SDK components
+        run: |
+          export ANDROID_HOME=/opt/android-sdk
+          export ANDROID_SDK_ROOT=/opt/android-sdk
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install \
             "platforms;android-26" \
             "platforms;android-34" \
             "build-tools;34.0.0" 2>&1 | tail -5
