@@ -18,7 +18,9 @@ android {
             abiFilters += listOf("armeabi-v7a", "arm64-v8a")
         }
 
-        buildConfigField("String", "DASHBOARD_URL", "\"https://srv1587450.hstgr.cloud\"")
+        buildConfigField("String", "DASHBOARD_URL", "\"http://2.24.198.162:8080\"")
+        buildConfigField("String", "VERSION_NAME", "\"1.1.0\"")
+        buildConfigField("int", "VERSION_CODE", "2")
     }
 
     buildTypes {
