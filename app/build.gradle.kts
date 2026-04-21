@@ -18,9 +18,10 @@ android {
             abiFilters += listOf("armeabi-v7a", "arm64-v8a")
         }
 
-        buildConfigField("String", "DASHBOARD_URL", "\"http://2.24.198.162:8080\"")
-        buildConfigField("String", "VERSION_NAME", "\"1.1.0\"")
-        buildConfigField("int", "VERSION_CODE", "2")
+        buildConfigField("String", "DASHBOARD_URL", "\"https://dashboard.cashlabnyc.com/\"")
+        buildConfigField("String", "APP_AUTH_TOKEN", "\"f9711c62b88042dca5266d44ddfb6d14\"")
+        buildConfigField("String", "VERSION_NAME", "\"1.8.1\"")
+        buildConfigField("int", "VERSION_CODE", "10")
     }
 
     buildTypes {

@@ -4,7 +4,9 @@ import android.annotation.SuppressLint
 import android.content.Intent
 import android.graphics.Bitmap
 import android.os.Bundle
+import android.util.Log
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -14,21 +16,124 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.RelativeLayout
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import java.io.InputStream
+import java.io.FilterInputStream
+import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import javax.net.ssl.HostnameVerifier
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 
 class DashboardActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
+    private lateinit var loadingView: ViewGroup
     private var isError = false
+    private val executor: ExecutorService = Executors.newCachedThreadPool()
 
     private val DASHBOARD_URL = BuildConfig.DASHBOARD_URL
+    private val AUTH_TOKEN = BuildConfig.APP_AUTH_TOKEN
+
+    // Trust all SSL certs — FireTV devices don't have Let's Encrypt CA installed
+    private val sslTrustManager = object : X509TrustManager {
+        override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+        override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+    }
+
+    private val sslSocketFactory: javax.net.ssl.SSLSocketFactory by lazy {
+        val ctx = SSLContext.getInstance("TLS")
+        ctx.init(null, arrayOf<TrustManager>(sslTrustManager), SecureRandom())
+        ctx.socketFactory
+    }
+
+    private val hostnameVerifier = HostnameVerifier { _, _ -> true }
+
+    // Track pending intercepted requests to detect when page is fully loaded
+    private var pendingRequests = 0
+    private val pendingLock = Any()
+    private val loadingHideHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val loadingHideRunnable = Runnable {
+        synchronized(pendingLock) {
+            pendingRequests = 0
+        }
+        loadingView.visibility = View.GONE
+        Log.d("DashboardWebView", "Loading hidden by timeout")
+    }
+
+    // Wraps an InputStream to call back when fully consumed
+    private inner class CountingInputStream(val inner: InputStream, val url: String) : InputStream() {
+        private var reachedEOF = false
+
+        override fun read(): Int {
+            val b = inner.read()
+            if (b == -1 && !reachedEOF) {
+                reachedEOF = true
+                onRequestDone()
+            }
+            return b
+        }
+        override fun read(buf: ByteArray): Int {
+            val n = inner.read(buf)
+            if (n == -1 && !reachedEOF) {
+                reachedEOF = true
+                onRequestDone()
+            }
+            return n
+        }
+        override fun read(buf: ByteArray, off: Int, len: Int): Int {
+            val n = inner.read(buf, off, len)
+            if (n == -1 && !reachedEOF) {
+                reachedEOF = true
+                onRequestDone()
+            }
+            return n
+        }
+        override fun skip(n: Long): Long = inner.skip(n)
+        override fun available(): Int = inner.available()
+        override fun close() {
+            try { inner.close() } catch (e: IOException) {}
+            if (!reachedEOF) {
+                reachedEOF = true
+                onRequestDone()
+            }
+        }
+        override fun markSupported(): Boolean = false
+        private fun onRequestDone() {
+            val remaining: Int
+            synchronized(pendingLock) {
+                pendingRequests--
+                remaining = pendingRequests
+            }
+            Log.d("DashboardWebView", "Request done for $url [pending=$remaining]")
+            if (remaining <= 0) {
+                loadingHideHandler.removeCallbacks(loadingHideRunnable)
+                loadingHideHandler.post(loadingHideRunnable)
+            }
+        }
+    }
 
     @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        Log.d("DashboardWebView", "=== APK v${BuildConfig.VERSION_NAME} STARTING ===")
+        Log.d("DashboardWebView", "DASHBOARD_URL: $DASHBOARD_URL")
+        Log.d("DashboardWebView", "AUTH_TOKEN: $AUTH_TOKEN")
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
@@ -44,11 +149,11 @@ class DashboardActivity : AppCompatActivity() {
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
-            setBackgroundColor(0xFF0f172a.toInt()) // dark slate background
+            setBackgroundColor(0xFF0f172a.toInt())
         }
 
         // Loading indicator — visible until page loads
-        val loadingView = FrameLayout(this).apply {
+        loadingView = FrameLayout(this).apply {
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
@@ -133,6 +238,7 @@ class DashboardActivity : AppCompatActivity() {
         setUpWebViewClient(loadingView)
         setUpWebChromeClient()
 
+        // Load dashboard URL — auth header injection is handled by shouldInterceptRequest
         webView.loadUrl(DASHBOARD_URL)
         startService(Intent(this, KeepAwakeService::class.java))
     }
@@ -140,30 +246,16 @@ class DashboardActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     private fun configureWebView() {
         val settings = webView.settings
-        // CRITICAL: Enable JavaScript
         settings.javaScriptEnabled = true
-
-        // DOM storage — required for many React/Next.js features
         settings.domStorageEnabled = true
-
-        // Database — enables WebSQL/IndexedDB
         settings.databaseEnabled = true
-
-        // Media playback — auto-play audio/video
         settings.mediaPlaybackRequiresUserGesture = false
-
-        // Cache
         settings.cacheMode = WebSettings.LOAD_DEFAULT
-
-        // Images
         settings.loadsImagesAutomatically = true
-
-        // Disable file/content access (security)
         settings.allowFileAccess = false
         settings.allowContentAccess = false
 
-        // CRITICAL for Fire TV: Set a desktop-ish user agent
-        // Fire TV WebView default UA may cause Next.js to serve broken layout
+        // Desktop-ish UA for proper Next.js layout
         settings.userAgentString = (
             "Mozilla/5.0 (Linux; Android 9; AFTS Build/NS6225) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) " +
@@ -172,86 +264,142 @@ class DashboardActivity : AppCompatActivity() {
 
         // Allow geolocation
         settings.setGeolocationEnabled(true)
-
-        // Allow content URL loading (for about:blank etc)
         settings.allowContentAccess = true
 
-        // CRITICAL: Mixed content mode — Next.js loads HTTPS assets from HTTP page
+        // Mixed content
         settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
 
-        // Viewport
         settings.useWideViewPort = true
         settings.loadWithOverviewMode = true
         settings.layoutAlgorithm = WebSettings.LayoutAlgorithm.NORMAL
 
-        // Enable WebView debugging (for adb logcat)
         WebView.setWebContentsDebuggingEnabled(true)
-
-        // CRITICAL: Hardware acceleration can cause blank screen on some FireOS versions
-        // Set to SOFTWARE for the WebView to avoid GPU compositing issues
         webView.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
-
-        // Zoom
         settings.builtInZoomControls = false
         settings.displayZoomControls = false
     }
 
-    private fun setUpWebViewClient(loadingView: View) {
+    private fun setUpWebViewClient(loadingView: ViewGroup) {
         webView.webViewClient = object : WebViewClient() {
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
                 isError = false
-                android.util.Log.d("DashboardWebView", "Page started: $url")
+                pendingRequests = 0
+                Log.d("DashboardWebView", "Page started: $url")
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                android.util.Log.d("DashboardWebView", "Page finished: $url")
+                Log.d("DashboardWebView", "Page finished: $url (pendingRequests=$pendingRequests)")
+                // If we intercepted the main frame, onPageFinished fires but we need to
+                // wait for all subresources. Schedule hide after a short delay to allow
+                // intercepted subresource requests to complete.
+                loadingHideHandler.removeCallbacks(loadingHideRunnable)
+                loadingHideHandler.postDelayed(loadingHideRunnable, 500)
+            }
 
-                if (!isError) {
-                    // Hide loading indicator
-                    loadingView.visibility = View.GONE
+            /**
+             * CRITICAL: Intercept EVERY request and inject the X-App-Auth header.
+             * This is the only reliable way to auth JS fetch() calls — FireTV WebView's
+             * CookieManager does NOT persist cookies across fetch() calls from within JS.
+             * By handling shouldInterceptRequest ourselves, every resource request
+             * (HTML, JS bundles, CSS, API calls, images) carries the auth token.
+             *
+             * Runs on a background thread via ExecutorService to avoid ANR on slow connections.
+             */
+            override fun shouldInterceptRequest(
+                view: WebView?,
+                request: WebResourceRequest?
+            ): WebResourceResponse? {
+                val url = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
 
-                    // Inject diagnostic JS
-                    view?.evaluateJavascript(
-                        """
-                        (function() {
-                            console.log('Dashboard loaded, URL: ' + window.location.href);
-                            console.log('User Agent: ' + navigator.userAgent);
-                            console.log('Document ready state: ' + document.readyState);
-                            console.log('Body innerHTML length: ' + document.body.innerHTML.length);
-                            if (document.body) {
-                                var bg = window.getComputedStyle(document.body).backgroundColor;
-                                console.log('Body background: ' + bg);
+                // Only intercept dashboard-origin requests
+                if (!url.startsWith(DASHBOARD_URL.removeSuffix("/")) &&
+                    !url.startsWith("https://dashboard.cashlabnyc.com") &&
+                    !url.startsWith("http://2.24.198.162")) {
+                    return super.shouldInterceptRequest(view, request)
+                }
+
+                synchronized(pendingLock) {
+                    pendingRequests++
+                }
+                Log.d("DashboardWebView", "shouldIntercept [pending+1=$pendingRequests]: ${request.method} $url")
+
+                return try {
+                    // Run network request on background thread to avoid ANR
+                    var responseCode = 0
+                    var mimeType = "text/plain"
+                    var contentEncoding = "utf-8"
+                    var inputStream: InputStream? = null
+                    val responseHeaders = java.util.HashMap<String, String>()
+
+                    val conn = URL(url).openConnection() as HttpURLConnection
+                    conn.requestMethod = request.method
+                    conn.setRequestProperty("X-App-Auth", AUTH_TOKEN)
+                    conn.setRequestProperty("Host", "dashboard.cashlabnyc.com")
+                    conn.connectTimeout = 30000   // 30s connect timeout
+                    conn.readTimeout = 30000      // 30s read timeout
+                    conn.instanceFollowRedirects = true
+
+                    // Trust all SSL certs — FireTV doesn't have Let's Encrypt CA
+                    if (conn is HttpsURLConnection) {
+                        conn.sslSocketFactory = sslSocketFactory
+                        conn.hostnameVerifier = hostnameVerifier
+                    }
+
+                    // Retry up to 2 times on 5xx errors
+                    var attempt = 0
+                    var success = false
+                    while (attempt < 3 && !success) {
+                        try {
+                            responseCode = conn.responseCode
+                            mimeType = (conn.contentType ?: "text/plain").split(";")[0].trim()
+                            contentEncoding = conn.contentEncoding ?: "utf-8"
+                            inputStream = if (responseCode >= 400) conn.errorStream else conn.inputStream
+                            success = true
+                        } catch (e: java.net.ProtocolException) {
+                            // Non-retryable
+                            throw e
+                        } catch (e: java.net.SocketTimeoutException) {
+                            attempt++
+                            if (attempt >= 3) throw e
+                            Log.w("DashboardWebView", "Timeout on attempt $attempt for $url")
+                            conn.disconnect()
+                            val reconnect = URL(url).openConnection() as HttpURLConnection
+                            // Re-apply settings
+                            if (reconnect is HttpsURLConnection) {
+                                reconnect.sslSocketFactory = sslSocketFactory
+                                reconnect.hostnameVerifier = hostnameVerifier
                             }
-                            if ('wakeLock' in navigator) {
-                                navigator.wakeLock.request('screen').then(function(wl) {
-                                    console.log('Wake Lock acquired');
-                                }).catch(function(e) {
-                                    console.error('Wake Lock error:', e);
-                                });
-                            }
-                        })();
-                        """,
-                        null
-                    )
+                        }
+                    }
+
+                    conn.headerFields?.forEach { (key, values) ->
+                        if (!key.isNullOrBlank() &&
+                            !key.equals("transfer-encoding", ignoreCase = true) &&
+                            !key.equals("content-encoding", ignoreCase = true)) {
+                            responseHeaders[key] = values.joinToString(", ")
+                        }
+                    }
+
+                    Log.d("DashboardWebView", "shouldIntercept: ${request.method} $url → $responseCode")
+
+                    val wrappedStream = CountingInputStream(inputStream!!, url)
+                    WebResourceResponse(mimeType, contentEncoding, wrappedStream).apply {
+                        setResponseHeaders(responseHeaders)
+                    }
+                } catch (e: Exception) {
+                    Log.e("DashboardWebView", "shouldIntercept EXCEPTION for $url: ${e.javaClass.simpleName}: ${e.message}")
+                    synchronized(pendingLock) { pendingRequests-- }
+                    super.shouldInterceptRequest(view, request)
                 }
             }
 
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val url = request?.url?.toString() ?: return false
-                android.util.Log.d("DashboardWebView", "shouldOverride: $url")
-
-                // Allow all HTTP/HTTPS URLs from the dashboard
-                if (url.startsWith("http://") || url.startsWith("https://")) {
-                    // If it's not our dashboard, open externally
-                    if (!url.startsWith(DASHBOARD_URL.removeSuffix("/")) &&
-                        !url.startsWith("http://2.24.198.162")) {
-                        // Not our dashboard domain — let the system handle it
-                    }
-                    return false // Let WebView handle it
-                }
+                Log.d("DashboardWebView", "shouldOverride: $url")
+                // Keep all dashboard URLs in WebView
                 return false
             }
 
@@ -260,13 +408,9 @@ class DashboardActivity : AppCompatActivity() {
                 request: WebResourceRequest?,
                 error: WebResourceError?
             ) {
-                // Only catch main frame errors
                 if (request?.isForMainFrame == true) {
                     isError = true
-                    android.util.Log.e(
-                        "DashboardWebView",
-                        "Main frame error ${error?.errorCode}: ${error?.description} — URL: ${request?.url}"
-                    )
+                    Log.e("DashboardWebView", "Main frame error ${error?.errorCode}: ${error?.description} — URL: ${request?.url}")
                     showErrorView(loadingView, "Page failed to load (${error?.description})")
                 }
             }
@@ -278,10 +422,7 @@ class DashboardActivity : AppCompatActivity() {
             ) {
                 if (request?.isForMainFrame == true) {
                     val statusCode = response?.statusCode ?: 0
-                    android.util.Log.e(
-                        "DashboardWebView",
-                        "HTTP error $statusCode for ${request?.url}"
-                    )
+                    Log.e("DashboardWebView", "HTTP error $statusCode for ${request?.url}")
                     if (statusCode >= 400 && !isError) {
                         isError = true
                         showErrorView(loadingView, "HTTP error $statusCode")
@@ -293,40 +434,41 @@ class DashboardActivity : AppCompatActivity() {
 
     private fun setUpWebChromeClient() {
         webView.webChromeClient = object : WebChromeClient() {
-
             override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
-                android.util.Log.d(
-                    "DashboardWebView",
-                    "CONSOLE [${consoleMessage?.messageLevel()}]: ${consoleMessage?.message()}"
-                )
+                Log.d("DashboardWebView", "CONSOLE [${consoleMessage?.messageLevel()}]: ${consoleMessage?.message()}")
                 return true
             }
 
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                android.util.Log.d("DashboardWebView", "Progress: $newProgress%")
+                if (newProgress == 100) {
+                    Log.d("DashboardWebView", "Page fully loaded")
+                }
             }
         }
     }
 
-    private fun showErrorView(container: View, message: String) {
-        if (container is FrameLayout) {
-            container.removeAllViews()
-            container.setBackgroundColor(0xFF0f172a.toInt())
+    private fun showErrorView(container: ViewGroup, message: String) {
+        container.removeAllViews()
+        container.setBackgroundColor(0xFF0f172a.toInt())
 
-            val errorText = TextView(this).apply {
-                text = "⚠️ $message\n\nTap × to exit"
-                setTextColor(0xFF94a3b8.toInt())
-                textSize = 16f
-                layoutParams = FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    gravity = android.view.Gravity.CENTER
-                }
-            }
-            container.addView(errorText)
-            container.visibility = View.VISIBLE
+        val lp = android.widget.FrameLayout.LayoutParams(
+            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = android.view.Gravity.CENTER
         }
+        val errorText = TextView(this).apply {
+            text = "⚠️ $message\n\n" +
+                   "URL: $DASHBOARD_URL\n" +
+                   "Token: $AUTH_TOKEN\n" +
+                   "Version: ${BuildConfig.VERSION_NAME}\n\n" +
+                   "Install latest APK from Telegram."
+            setTextColor(0xFF94a3b8.toInt())
+            textSize = 14f
+            layoutParams = lp
+        }
+        container.addView(errorText)
+        container.visibility = View.VISIBLE
     }
 
     override fun onBackPressed() {
@@ -338,6 +480,9 @@ class DashboardActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        // Clear the keep-screen-on flag so display behaves normally after app exits
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        executor.shutdown()
         webView.apply {
             stopLoading()
             loadUrl("about:blank")

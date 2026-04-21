@@ -1,0 +1,63 @@
+name: Build & Release APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build APK
+        run: ./gradlew assembleRelease --no-daemon -q
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/release/app-release.apk firetv-v1.8.1.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: firetv-apk
+          path: firetv-v1.8.1.apk
+
+      - name: Download APK
+        uses: actions/download-artifact@v4
+        with:
+          name: firetv-apk
+          path: .
+
+      - name: Upload to Telegram
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
+            -F chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -F document=@firetv-v1.8.1.apk \
+            -F caption="APK build complete: ${{ github.sha }}"
+
+      - name: Upload to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          echo "$VPS_KEY" | tr -d '\n' > /tmp/vps_key
+          chmod 600 /tmp/vps_key
+          curl -s -o /dev/null \
+            -F "file=@firetv-v1.8.1.apk" \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument?chat_id=${{ secrets.TELEGRAM_CHAT_ID }}&caption=VPS-ready APK"
