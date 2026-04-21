@@ -72,21 +72,21 @@ jobs:
           export ANDROID_HOME=/usr/local/lib/android/sdk
           mkdir -p ~/.android
           echo "$DEBUG_KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
-          APK="app/build/outputs/apk/release/app-release.apk"
+          APK_IN="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
           # Unzip, remove v1 signature files, repack
           cd /tmp
           mkdir -p unsigned_apk
-          cp $APK unsigned.apk
+          cp "$APK_IN" unsigned.apk
           cd unsigned_apk
           unzip -q ../unsigned.apk
           # Remove v1 signature entries (keep CERT.RSA/CERT.SF which are v2)
           rm -f META-INF/CASHLAB-.SF META-INF/CASHLAB-.RSA META-INF/MANIFEST.MF
-          # Repack APK (store alignment is handled by zipalign below)
+          # Repack APK
           zip -q -r ../fixed.apk *
           cd ..
           # Verify v2-only APK
           $ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 fixed.apk
-          mv fixed.apk $APK
+          mv fixed.apk "$APK_IN"
 
       - name: Upload APK as artifact
         if: always()
@@ -105,7 +105,7 @@ jobs:
           echo "$VPS_SSH_KEY" > /tmp/vps_key
           chmod 600 /tmp/vps_key
           scp -o StrictHostKeyChecking=no -i /tmp/vps_key \
-            app/build/outputs/apk/release/app-release.apk \
+            "$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk" \
             $VPS_USER@$VPS_HOST:/tmp/firetv-release.apk
           ssh -o StrictHostKeyChecking=no -i /tmp/vps_key $VPS_USER@$VPS_HOST \
             "docker cp /tmp/firetv-release.apk firetv-app:/usr/share/nginx/html/apk/firetv-release.apk && \
