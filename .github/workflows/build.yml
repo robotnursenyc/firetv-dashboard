@@ -65,28 +65,28 @@ jobs:
           gradle assembleRelease --no-daemon 2>&1 | tail -30
           find . -name "*.apk" 2>/dev/null
 
-      - name: Fix APK signatures (strip all, re-sign v2 only)
+      - name: Fix APK signatures (strip v1 sigs, keep v2 only)
         env:
           DEBUG_KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_B64 }}
         run: |
-          export ANDROID_HOME=/opt/android-sdk
+          export ANDROID_HOME=/usr/local/lib/android/sdk
           mkdir -p ~/.android
           echo "$DEBUG_KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
           APK="app/build/outputs/apk/release/app-release.apk"
-          # Step 1: remove all existing signatures
-          $ANDROID_HOME/build-tools/34.0.0/apksigner remove-signatures --out /tmp/unsigned.apk $APK
-          # Step 2: re-sign with v2 only
-          $ANDROID_HOME/build-tools/34.0.0/apksigner sign \
-            --ks ~/.android/debug.keystore \
-            --ks-pass pass:android \
-            --key-pass pass:android \
-            --v1-signing-enabled=false \
-            --v2-signing-enabled \
-            --out app/build/outputs/apk/release/app-release-fixed.apk \
-            /tmp/unsigned.apk
-          mv app/build/outputs/apk/release/app-release-fixed.apk $APK
-          echo "=== VERIFY SIGNATURES ==="
-          $ANDROID_HOME/build-tools/34.0.0/apksigner verify -v $APK
+          # Unzip, remove v1 signature files, repack
+          cd /tmp
+          mkdir -p unsigned_apk
+          cp $APK unsigned.apk
+          cd unsigned_apk
+          unzip -q ../unsigned.apk
+          # Remove v1 signature entries (keep CERT.RSA/CERT.SF which are v2)
+          rm -f META-INF/CASHLAB-.SF META-INF/CASHLAB-.RSA META-INF/MANIFEST.MF
+          # Repack APK (store alignment is handled by zipalign below)
+          zip -q -r ../fixed.apk *
+          cd ..
+          # Verify v2-only APK
+          $ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 fixed.apk
+          mv fixed.apk $APK
 
       - name: Upload APK as artifact
         if: always()
