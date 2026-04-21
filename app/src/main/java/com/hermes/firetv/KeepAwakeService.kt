@@ -53,6 +53,8 @@ class KeepAwakeService : Service() {
 
     @SuppressLint("ClickableViewAccessibility")
     private fun sendFakeTouch() {
+        // Note: injectInputEvent requires root/TV system permissions.
+        // Without root, this is best-effort — the PARTIAL_WAKE_LOCK keeps CPU alive.
         try {
             val dm = resources.displayMetrics
             val centerX = dm.widthPixels / 2f
@@ -64,8 +66,7 @@ class KeepAwakeService : Service() {
             val up = MotionEvent.obtain(
                 0L, 0L, MotionEvent.ACTION_UP, centerX, centerY, 0
             )
-            down.recycle()
-            up.recycle()
+            // Don't recycle here — let the system handle it after dispatch
         } catch (e: Exception) {
             // Best-effort — no root means we rely on WAKE_LOCK instead
         }
