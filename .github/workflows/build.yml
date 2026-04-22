@@ -53,7 +53,6 @@ jobs:
         run: |
           java -version 2>&1
           gradle --version 2>&1
-          echo "ANDROID_HOME=$ANDROID_HOME"
           gradle :app:assembleRelease --no-daemon --stacktrace 2>&1
           echo "=== APK files found ==="
           find . -name "*.apk" 2>/dev/null
@@ -117,7 +116,7 @@ jobs:
           fi
           echo "SUCCESS: APK is signed v2+v3 only"
 
-      - name: Capture signed APK SHA and path
+      - name: Capture signed APK SHA
         id: sha
         run: |
           APK="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
@@ -125,131 +124,135 @@ jobs:
           APK_SIZE=$(stat -c %s "$APK")
           echo "SIGNED_APK_SHA=$SIGNED_SHA" >> $GITHUB_ENV
           echo "SIGNED_APK_SIZE=$APK_SIZE" >> $GITHUB_ENV
-          echo "SIGNED_APK_PATH=$APK" >> $GITHUB_ENV
           echo "=== Signed APK ==="
           echo "SHA: $SIGNED_SHA"
           echo "Size: $APK_SIZE bytes"
-          echo "Path: $APK"
 
-      - name: Upload APK as artifact
-        id: artifact-upload
-        uses: actions/upload-artifact@v4
+      - name: Create GitHub Release
+        id: release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          name: firetv-release-aligned-${{ github.run_number }}
-          path: ${{ github.workspace }}/app/build/outputs/apk/release/app-release.apk
-          retention-days: 7
+          tag_name: build-${{ github.run_number }}
+          release_name: FireTV Build #${{ github.run_number }}
+          draft: false
+          prerelease: false
 
-      - name: Verify artifact was uploaded
+      - name: Upload signed APK to Release
+        id: upload-release-asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.release.outputs.upload_url }}
+          asset_path: ${{ github.workspace }}/app/build/outputs/apk/release/app-release.apk
+          asset_name: firetv-release.apk
+          asset_content_type: application/vnd.android.package-archive
+
+      - name: Verify release asset URL
         run: |
-          echo "=== Artifact verification ==="
-          echo "Artifact name: firetv-release-aligned-${{ github.run_number }}"
+          echo "=== Release info ==="
+          echo "Tag: build-${{ github.run_number }}"
+          echo "Upload URL: ${{ steps.release.outputs.upload_url }}"
           echo "Expected APK SHA: ${{ env.SIGNED_APK_SHA }}"
           echo "Expected size: ${{ env.SIGNED_APK_SIZE }} bytes"
-          echo "Artifact ID: ${{ steps.artifact-upload.outputs.artifact-id }}"
 
       # ── Deploy to VPS ────────────────────────────────────────────────────────
-      # Strategy: download this run's artifact from GitHub API, verify SHA matches,
-      # then deploy via SCP. Downloading from GitHub API avoids any runner-local
-      # file confusion. We then explicitly SCP the downloaded file, not any
-      # workspace file.
+      # Strategy: download the Release asset (CDN-backed, always correct file),
+      # then deploy via SCP. Release assets are stored on GitHub's CDN and
+      # always return the exact file that was uploaded — no artifact deduplication bugs.
       - name: Deploy to VPS
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
-          ARTIFACT_ID: ${{ steps.artifact-upload.outputs.artifact-id }}
           BUILD_NUM: ${{ github.run_number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           set -e
-          mkdir -p /tmp/apk_deploy /tmp/ssh_hermes
+          echo "=== STEP 1: Download Release asset (CDN-backed, always correct file) ==="
+          TMP_APK="/tmp/firetv-release-$(date +%s).apk"
+          curl -sSL \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/$REPO/releases/tags/build-$BUILD_NUM" \
+            -o /tmp/release.json
 
-          # Write SSH key
-          echo "$VPS_SSH_KEY" > /tmp/ssh_hermes/vps_key
-          chmod 600 /tmp/ssh_hermes/vps_key
-
-          # Download artifact from GitHub API (not from runner filesystem)
-          echo "=== STEP 1: Download artifact from GitHub API ==="
-          echo "Artifact ID: $ARTIFACT_ID"
-          if [ -z "$ARTIFACT_ID" ] || [ "$ARTIFACT_ID" = "0" ]; then
-            echo "FATAL: No artifact ID — cannot deploy"
-            exit 1
-          fi
+          ASSET_URL=$(python3 -c "import json; r=json.load(open('/tmp/release.json')); print(next(a['browser_download_url'] for a in r['assets'] if a['name']=='firetv-release.apk'))")
+          echo "Asset URL: $ASSET_URL"
 
           curl -sSL \
             -H "Authorization: token $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" \
-            -o /tmp/apk_deploy/artifact.zip
+            -L "$ASSET_URL" \
+            -o "$TMP_APK"
 
-          echo "Artifact zip size: $(du -h /tmp/apk_deploy/artifact.zip | cut -f1)"
-          unzip -q /tmp/apk_deploy/artifact.zip -d /tmp/apk_deploy/apk_contents
-
-          APK_FROM_ARTIFACT=$(find /tmp/apk_deploy/apk_contents -name "*.apk" | head -1)
-          if [ -z "$APK_FROM_ARTIFACT" ] || [ ! -f "$APK_FROM_ARTIFACT" ]; then
-            echo "FATAL: Could not extract APK from artifact zip"
-            ls /tmp/apk_deploy/apk_contents/
-            exit 1
-          fi
-
-          echo "Artifact APK: $APK_FROM_ARTIFACT"
-          echo "Artifact APK size: $(du -h "$APK_FROM_ARTIFACT" | cut -f1)"
-
-          # Verify SHA of downloaded artifact
-          ARTIFACT_SHA=$(sha256sum "$APK_FROM_ARTIFACT" | cut -d' ' -f1)
-          echo "Artifact APK SHA: $ARTIFACT_SHA"
+          DOWNLOAD_SHA=$(sha256sum "$TMP_APK" | cut -d' ' -f1)
+          DOWNLOAD_SIZE=$(stat -c %s "$TMP_APK")
+          echo "Downloaded APK size: $DOWNLOAD_SIZE bytes"
+          echo "Downloaded APK SHA: $DOWNLOAD_SHA"
           echo "Expected SHA: $SIGNED_APK_SHA"
-          if [ "$ARTIFACT_SHA" != "$SIGNED_APK_SHA" ]; then
-            echo "FATAL: Downloaded artifact SHA doesn't match. Storage corruption suspected."
+
+          if [ "$DOWNLOAD_SHA" != "$SIGNED_APK_SHA" ]; then
+            echo "FATAL: Downloaded Release asset SHA doesn't match. CDN returned wrong file."
             exit 1
           fi
-          echo "Artifact SHA verified OK."
+          echo "Release asset SHA verified OK."
 
-          # Quick signature check on downloaded artifact
-          echo "=== STEP 2: Verify artifact APK has v2 signature ==="
-          if ! $ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 "$APK_FROM_ARTIFACT" 2>&1 | grep -q "Verified using v2 scheme"; then
-            echo "FATAL: Downloaded APK has no v2 signature — not a valid FireTV APK"
-            $ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 "$APK_FROM_ARTIFACT" 2>&1
+          echo "=== STEP 2: Verify v2 signature on downloaded APK ==="
+          if ! $ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 "$TMP_APK" 2>&1 | grep -q "Verified using v2 scheme"; then
+            echo "FATAL: Downloaded APK has no v2 signature"
             exit 1
           fi
-          echo "Artifact APK signature verified."
+          echo "v2 signature verified OK."
 
-          # SCP downloaded artifact to VPS
-          echo "=== STEP 3: SCP APK to VPS ==="
+          echo "=== STEP 3: Write SSH key ==="
+          mkdir -p /tmp/ssh_hermes
+          echo "$VPS_SSH_KEY" > /tmp/ssh_hermes/vps_key
+          chmod 600 /tmp/ssh_hermes/vps_key
+          # Determine home dir for VPS_USER
+          if [ "$VPS_USER" = "root" ]; then
+            VPS_HOME="/root"
+          else
+            VPS_HOME="/home/$VPS_USER"
+          fi
+          echo "VPS user: $VPS_USER, home: $VPS_HOME"
+
+          echo "=== STEP 4: SCP APK to VPS ==="
           scp -o StrictHostKeyChecking=no \
              -i /tmp/ssh_hermes/vps_key \
-             "$APK_FROM_ARTIFACT" \
-             "$VPS_USER@$VPS_HOST:/home/hermes/firetv-release.apk"
+             "$TMP_APK" \
+             "$VPS_USER@$VPS_HOST:$VPS_HOME/firetv-release.apk"
           echo "scp exit: $?"
 
-          # Verify file on VPS host
-          echo "=== STEP 4: Verify file on VPS host ==="
+          echo "=== STEP 5: Verify file on VPS host ==="
           VPS_SHA=$(ssh -o StrictHostKeyChecking=no \
               -i /tmp/ssh_hermes/vps_key \
               "$VPS_USER@$VPS_HOST" \
-              sha256sum /home/hermes/firetv-release.apk | cut -d' ' -f1)
+              sha256sum "$VPS_HOME/firetv-release.apk" | cut -d' ' -f1)
           echo "VPS host SHA: $VPS_SHA"
           if [ "$VPS_SHA" != "$SIGNED_APK_SHA" ]; then
-            echo "FATAL: VPS file SHA doesn't match. SCP corruption or wrong file."
+            echo "FATAL: VPS file SHA doesn't match. SCP corrupted the file."
             exit 1
           fi
           echo "VPS SHA verified OK."
 
-          # Atomic deploy into container
-          echo "=== STEP 5: Atomic deploy into container ==="
+          echo "=== STEP 6: Atomic deploy into container ==="
           ssh -o StrictHostKeyChecking=no \
               -i /tmp/ssh_hermes/vps_key \
               "$VPS_USER@$VPS_HOST" \
-              "docker exec apk-serve sh -c '
-                set -e
-                cp /home/hermes/firetv-release.apk /tmp/firetv-release.apk.new
-                chmod 644 /tmp/firetv-release.apk.new
-                echo {\\\"version\\\":\\\"1.0\\\",\\\"build\\\":$BUILD_NUM,\\\"sha256\\\":\\\"$SIGNED_APK_SHA\\\",\\\"apk_url\\\":\\\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\\\"} > /tmp/version.json.new
-                mv /tmp/firetv-release.apk.new /usr/share/nginx/html/apk/firetv-release.apk
-                mv /tmp/version.json.new /usr/share/nginx/html/apk/version.json
-                echo DEPLOYED_SHA: && sha256sum /usr/share/nginx/html/apk/firetv-release.apk
-                cat /usr/share/nginx/html/apk/version.json
-              '"
+              "docker cp $VPS_HOME/firetv-release.apk apk-serve:/tmp/firetv-release.apk && \
+               docker exec apk-serve sh -c '
+                 set -e
+                 cp /tmp/firetv-release.apk /usr/share/nginx/html/apk/firetv-release.apk.new
+                 chmod 644 /usr/share/nginx/html/apk/firetv-release.apk.new
+                 echo {\\\"version\\\":\\\"1.0\\\",\\\"build\\\":$BUILD_NUM,\\\"sha256\\\":\\\"$SIGNED_APK_SHA\\\",\\\"apk_url\\\":\\\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\\\"} > /usr/share/nginx/html/apk/version.json.new
+                 mv /usr/share/nginx/html/apk/firetv-release.apk.new /usr/share/nginx/html/apk/firetv-release.apk
+                 mv /usr/share/nginx/html/apk/version.json.new /usr/share/nginx/html/apk/version.json
+                 echo FINAL_SHA: && sha256sum /usr/share/nginx/html/apk/firetv-release.apk
+                 cat /usr/share/nginx/html/apk/version.json
+               '"
 
           echo "=== Deploy complete ==="
           echo "APK URL: https://dashboard.cashlabnyc.com/apk/firetv-release.apk"
