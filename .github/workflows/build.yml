@@ -55,11 +55,19 @@ jobs:
       - name: Download Gradle
         run: |
           cd /tmp
-          if [ ! -d "gradle-8.4" ]; then
+          if [ ! -f "gradle-8.4/bin/gradle" ]; then
             wget -q "https://services.gradle.org/distributions/gradle-8.4-bin.zip" -O gradle.zip
             unzip -q gradle.zip
           fi
           echo "/tmp/gradle-8.4/bin" >> $GITHUB_PATH
+
+      # Create local.properties so Gradle knows where the Android SDK lives.
+      # ANDROID_HOME is set in the env block of the Build step, but the
+      # Android Gradle plugin also reads local.properties.
+      - name: Create local.properties
+        run: |
+          echo "sdk.dir=/opt/android-sdk" > $GITHUB_WORKSPACE/local.properties
+          echo "Created: $(cat $GITHUB_WORKSPACE/local.properties)"
 
       # ── Inject secrets into gradle.properties and acra.properties before build ────
       # Auth token: used in BuildConfig for X-App-Auth header.
@@ -102,7 +110,7 @@ jobs:
           echo "=== Working directory ==="
           echo "PWD=$(pwd)"
           echo "=== Running assembleRelease ==="
-          gradle assembleRelease --no-daemon --stacktrace 2>&1
+          gradle :app:assembleRelease --no-daemon --stacktrace 2>&1
           echo "=== APK files found ==="
           find . -name "*.apk" 2>/dev/null
 
