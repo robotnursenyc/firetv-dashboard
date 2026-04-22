@@ -57,6 +57,7 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Always-on Fire TV dashboard display" />
+        </service>
 
         <!-- Boot receiver — launches DashboardActivity after device boot.
              This makes the dashboard auto-resume after power loss or firmware update. -->
