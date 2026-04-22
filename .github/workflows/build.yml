@@ -49,7 +49,6 @@ jobs:
           echo "CI_BUILD_NUMBER=${{ github.run_number }}" >> $GITHUB_WORKSPACE/gradle.properties
 
       - name: Build release APK
-        continue-on-error: true
         run: |
           java -version 2>&1
           gradle --version 2>&1
@@ -128,33 +127,21 @@ jobs:
           echo "SHA: $SIGNED_SHA"
           echo "Size: $APK_SIZE bytes"
 
-      - name: Create GitHub Release
-        id: release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v1
         with:
           tag_name: build-${{ github.run_number }}
-          release_name: FireTV Build #${{ github.run_number }}
+          name: FireTV Build #${{ github.run_number }}
+          files: ${{ github.workspace }}/app/build/outputs/apk/release/app-release.apk
           draft: false
           prerelease: false
-
-      - name: Upload signed APK to Release
-        id: upload-release-asset
-        uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.release.outputs.upload_url }}
-          asset_path: ${{ github.workspace }}/app/build/outputs/apk/release/app-release.apk
-          asset_name: firetv-release.apk
-          asset_content_type: application/vnd.android.package-archive
 
       - name: Verify release asset URL
         run: |
           echo "=== Release info ==="
           echo "Tag: build-${{ github.run_number }}"
-          echo "Upload URL: ${{ steps.release.outputs.upload_url }}"
           echo "Expected APK SHA: ${{ env.SIGNED_APK_SHA }}"
           echo "Expected size: ${{ env.SIGNED_APK_SIZE }} bytes"
 
@@ -174,13 +161,10 @@ jobs:
           set -e
           echo "=== STEP 1: Download Release asset (CDN-backed, always correct file) ==="
           TMP_APK="/tmp/firetv-release-$(date +%s).apk"
-          curl -sSL \
-            -H "Authorization: token $GH_TOKEN" \
-            -H "Accept: application/octet-stream" \
-            "https://api.github.com/repos/$REPO/releases/tags/build-$BUILD_NUM" \
-            -o /tmp/release.json
 
-          ASSET_URL=$(python3 -c "import json; r=json.load(open('/tmp/release.json')); print(next(a['browser_download_url'] for a in r['assets'] if a['name']=='firetv-release.apk'))")
+          # softprops/action-gh-release uploads to a URL like:
+          # https://github.com/robotnursenyc/firetv-dashboard/releases/download/build-127/firetv-release.apk
+          ASSET_URL="https://github.com/$REPO/releases/download/build-$BUILD_NUM/firetv-release.apk"
           echo "Asset URL: $ASSET_URL"
 
           curl -sSL \
