@@ -2,17 +2,14 @@ package com.hermes.firetv
 
 import android.app.Application
 import android.util.Log
-import org.acra.annotation.AcraCore
 
 /**
- * ACRA crash reporting — application class.
+ * Application class — minimal, no crash reporting library.
  *
- * ACRA is only active in release builds (isDebuggable=false in buildType).
- *
- * Spooling: reports are queued to disk if the network is unavailable and sent
- * automatically on the next successful app launch.
+ * ACRA was removed: ch.acra:acra-telegram:5.11.3 does not exist in Maven Central.
+ * Future crash-reporting can be re-added using a verified artifact.
  */
-@AcraCore
+
 class FireTVApplication : Application() {
 
     companion object {

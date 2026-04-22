@@ -1,7 +1,9 @@
 package com.hermes.firetv
 
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -399,14 +401,13 @@ class DashboardActivity : AppCompatActivity() {
                 detail: RenderProcessGoneDetail?
             ): Boolean {
                 val crashed = detail?.didCrash() ?: false
-                val renderer = detail?.rendererTerminatedReason() ?: "unknown"
-                Log.e(TAG, "RENDER PROCESS GONE — crashed=$crashed reason=$renderer")
+                Log.e(TAG, "RENDER PROCESS GONE — didCrash=$crashed")
                 if (crashed) {
                     Log.w(TAG, "Renderer crashed — reloading WebView")
                     // Reload without full Activity recreation; WebView is recreated by the system.
                     handler.postDelayed({ webView.reload() }, 1_000)
                 }
-                return true  // Let the system handle its own error page; we handle recovery.
+                return true  // Consume the callback; WebView will show its own error page.
             }
         }
     }
