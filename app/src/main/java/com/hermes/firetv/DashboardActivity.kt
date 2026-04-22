@@ -387,6 +387,27 @@ class DashboardActivity : AppCompatActivity() {
                 Log.d(TAG, "Page finished: $url")
                 injectJsHealthCheck()
             }
+
+            /**
+             * Called when the WebView's render process terminates.
+             * This happens under memory pressure or after a JS crash — not the same
+             * as onReceivedError. Returning true tells the WebView to attempt a reload
+             * via the default error page; we additionally trigger a full reload.
+             */
+            override fun onRenderProcessGone(
+                view: WebView?,
+                detail: RenderProcessGoneDetail?
+            ): Boolean {
+                val crashed = detail?.didCrash() ?: false
+                val renderer = detail?.rendererTerminatedReason() ?: "unknown"
+                Log.e(TAG, "RENDER PROCESS GONE — crashed=$crashed reason=$renderer")
+                if (crashed) {
+                    Log.w(TAG, "Renderer crashed — reloading WebView")
+                    // Reload without full Activity recreation; WebView is recreated by the system.
+                    handler.postDelayed({ webView.reload() }, 1_000)
+                }
+                return true  // Let the system handle its own error page; we handle recovery.
+            }
         }
     }
 

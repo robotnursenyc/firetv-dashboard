@@ -11,6 +11,7 @@
 
 # Gradle (recursive)
 **/.gradle/
+# Gradle wrapper (versioned — needed for local builds)
 !gradle/wrapper/gradle-wrapper.jar
 
 # Local config (contains secrets — never commit)
