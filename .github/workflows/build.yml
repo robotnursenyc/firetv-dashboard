@@ -105,12 +105,13 @@ jobs:
 
       - name: Verify release APK was produced
         run: |
-          APK="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
+          # assembleRelease produces app-release-unsigned.apk when no signing config is set.
+          # The signing step (Strip v1 signature) reads this and writes app-release.apk.
+          APK="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release-unsigned.apk"
           if [ ! -f "$APK" ]; then
-            echo "ERROR: app-release.apk not found!"
+            echo "ERROR: app-release-unsigned.apk not found!"
             echo "APK dir contents:"
-            ls -la $GITHUB_WORKSPACE/app/build/outputs/apk/ 2>/dev/null || echo 'apk dir does not exist'
-            ls -la $GITHUB_WORKSPACE/app/build/outputs/ 2>/dev/null || echo 'outputs dir does not exist'
+            ls -la $GITHUB_WORKSPACE/app/build/outputs/apk/release/ 2>/dev/null || echo 'release dir does not exist'
             exit 1
           fi
           echo "APK size: $(du -h "$APK" | cut -f1)"
@@ -137,8 +138,10 @@ jobs:
           keytool -list -v -keystore /tmp/firetv-upload.jks \
             -storepass "$UPLOAD_KEYSTORE_PASSWORD" 2>&1 | grep -A2 "Alias name" || true
 
-          APK_IN="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
-          APK_FIXED="/tmp/firetv-signed.apk"
+          # assembleRelease produces app-release-unsigned.apk (no signing config defined).
+          # Sign it and write to app-release.apk.
+          APK_IN="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release-unsigned.apk"
+          APK_OUT="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
 
           echo "=== Verifying input APK ==="
           $ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 "$APK_IN" 2>&1 || true
@@ -151,13 +154,13 @@ jobs:
             --ks-key-alias "$UPLOAD_KEYSTORE_ALIAS" \
             --ks-pass "pass:$UPLOAD_KEYSTORE_PASSWORD" \
             --key-pass "pass:$UPLOAD_KEY_PASSWORD" \
-            --out "$APK_FIXED" \
+            --out "$APK_OUT" \
             "$APK_IN" 2>&1
 
           echo "=== Verifying output signature ==="
-          $ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 "$APK_FIXED" 2>&1
+          $ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 "$APK_OUT" 2>&1
 
-          VERIFY_OUT=$($ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 "$APK_FIXED" 2>&1)
+          VERIFY_OUT=$($ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 "$APK_OUT" 2>&1)
           if echo "$VERIFY_OUT" | grep -q "Verified using v1 scheme (JAR signing)"; then
             echo "ERROR: v1 signature still present!"
             exit 1
@@ -167,8 +170,7 @@ jobs:
           fi
 
           echo "=== Copying signed APK back ==="
-          cp "$APK_FIXED" "$APK_IN"
-          echo "Final APK: $(du -h "$APK_IN" | cut -f1)"
+          echo "Final APK: $(du -h "$APK_OUT" | cut -f1)"
 
       - name: Upload APK as artifact
         uses: actions/upload-artifact@v4
