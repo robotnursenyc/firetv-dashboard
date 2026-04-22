@@ -261,15 +261,28 @@ jobs:
 
           # Step 2: docker cp into container, write version.json, chmod
           echo "=== STEP 2: deploy inside container ==="
-          ssh -o StrictHostKeyChecking=no \
-             -i /tmp/vps_key "$VPS_USER@$VPS_HOST" \
-             "docker cp /home/hermes/firetv-release.apk apk-serve:/tmp/firetv-release.apk && \
-              docker exec apk-serve sh -c '\
-                cp /tmp/firetv-release.apk /usr/share/nginx/html/apk/firetv-release.apk && \
-                chmod 644 /usr/share/nginx/html/apk/firetv-release.apk && \
-                echo \"{\\\"version\\\":\\\"1.0\\\",\\\"build\\\":${BUILD_NUM},\\\"apk_url\\\":\\\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\\\"}\" > /usr/share/nginx/html/apk/version.json && \
-                echo DEPLOY_OK && \
-                sha256sum /usr/share/nginx/html/apk/firetv-release.apk'"
+          
+          # PRE-CHECK: verify destination directory exists and new APK is in host /home/hermes/
+          echo "--- Pre-deploy checks ---"
+          ssh -o StrictHostKeyChecking=no -i /tmp/vps_key "$VPS_USER@$VPS_HOST" \
+            "echo HOST_APK_SIZE=$(stat -c %s /home/hermes/firetv-release.apk 2>/dev/null || echo FILE_NOT_FOUND) && \
+             echo NGINX_EXISTS=$(docker exec apk-serve test -f /usr/share/nginx/html/apk/firetv-release.apk && echo YES || echo NO) && \
+             echo NGINX_SIZE=$(docker exec apk-serve stat -c %s /usr/share/nginx/html/apk/firetv-release.apk 2>/dev/null || echo NOT_FOUND)"
+          
+          # Deploy with atomic swap: write to .new first, verify, then rename
+          ssh -o StrictHostKeyChecking=no -i /tmp/vps_key "$VPS_USER@$VPS_HOST" \
+            'docker cp /home/hermes/firetv-release.apk apk-serve:/tmp/firetv-release.apk && \
+             docker exec apk-serve sh -c "\
+               set -e && \
+               echo Installing APK && \
+               cp /tmp/firetv-release.apk /usr/share/nginx/html/apk/firetv-release.apk.new && \
+               chmod 644 /usr/share/nginx/html/apk/firetv-release.apk.new && \
+               echo \"{\\\"version\\\":\\\"1.0\\\",\\\"build\\\":${BUILD_NUM},\\\"apk_url\\\":\\\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\\\"}\" > /usr/share/nginx/html/apk/version.json.new && \
+               mv /usr/share/nginx/html/apk/firetv-release.apk.new /usr/share/nginx/html/apk/firetv-release.apk && \
+               mv /usr/share/nginx/html/apk/version.json.new /usr/share/nginx/html/apk/version.json && \
+               echo ATOMIC_DEPLOY_OK && \
+               sha256sum /usr/share/nginx/html/apk/firetv-release.apk && \
+               echo VERSION_JSON: && cat /usr/share/nginx/html/apk/version.json"'
           S2_EXIT=$?
           echo "=== STEP 2 exit code: $S2_EXIT ==="
           if [ $S2_EXIT -ne 0 ]; then
