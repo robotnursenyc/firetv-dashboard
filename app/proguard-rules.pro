@@ -19,9 +19,13 @@
 -dontwarn kotlin.**
 -keep class kotlin.** { *; }
 
-# ACRA
--dontwarn ch.acra.**
--keep class ch.acra.** { *; }
-
-# Keep BuildConfig fields (AUTH_TOKEN etc.) accessible at runtime for crash reports.
+# Keep BuildConfig fields (AUTH_TOKEN etc.) accessible at runtime.
 -keep class com.hermes.firetv.BuildConfig { *; }
+
+# Keep CrashLogger (used by DashboardActivity).
+-keep class com.hermes.firetv.CrashLogger { *; }
+
+# Keep @JavascriptInterface methods (public API called from JS).
+-keepclassmembers class com.hermes.firetv.DashboardActivity {
+    @android.webkit.JavascriptInterface <methods>;
+}

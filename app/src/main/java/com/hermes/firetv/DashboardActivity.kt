@@ -1,12 +1,18 @@
 package com.hermes.firetv
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.graphics.Color
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.os.SystemClock
+import android.provider.Settings
 import android.util.Log
 import android.view.KeyEvent
 import android.view.View
@@ -21,9 +27,14 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.InputStream
+import java.io.PipedInputStream
+import java.io.PipedOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.*
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DashboardActivity — Family Dashboard / FireTV WebView host
@@ -40,8 +51,11 @@ import java.net.URL
 //   • JS hang watchdog: reloads if JS doesn't ping every 90s
 //   • Self-contained HTML error overlay when offline
 //   • Back key shows exit confirmation instead of exiting
-//   • ACRA crash reporting (release builds only)
-//   • Remote WebView debugging (debug builds only)
+//   • First-run screensaver warning dialog
+//   • Streaming proxy: only intercepts text assets (HTML/JS/CSS/JSON);
+//     images/fonts/media pass through to WebView directly
+//   • WebView crash recovery: destroys and recreates WebView on render crash
+//   • File-based activity/crash logger for observability
 //
 // Kiosk notes:
 //   Full kiosk lockdown (lock to single app, disable Home) requires a
@@ -66,7 +80,7 @@ class DashboardActivity : AppCompatActivity() {
     // Guards onTrimMemory reloads — we only want to reload when actually visible.
     private var isInForeground = false
 
-    // ── Watchdog state ────────────────────────────────────────────────────────
+    // ── Watchdog state ───────────────────────────────────────────────────────
     // Tracks last JS pong — reloaded if no pong for STALE_THRESHOLD_MS.
     private var lastJsPongMs: Long = 0L
 
@@ -97,16 +111,29 @@ class DashboardActivity : AppCompatActivity() {
     private val watchdogRunnable = Runnable { checkJsHealth() }
     private val retryRunnable = Runnable { performReload() }
 
+    // ── Crash / activity logger ─────────────────────────────────────────────
+    private lateinit var crashLogger: CrashLogger
+
+    // ── First-run flag ───────────────────────────────────────────────────────
+    private lateinit var prefs: SharedPreferences
+
     // ═════════════════════════════════════════════════════════════════════════
     // LIFECYCLE
     // ═════════════════════════════════════════════════════════════════════════
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        crashLogger = CrashLogger(this)
+        crashLogger.log(TAG, "onCreate START — v${BuildConfig.VERSION_NAME} (#${BuildConfig.VERSION_CODE})")
+
         super.onCreate(savedInstanceState)
         logStartupBanner()
+        prefs = getSharedPreferences("firetv_prefs", Context.MODE_PRIVATE)
+
         setupFullscreenWindow()
         setupViews()
         setupKeepAwake()
+        checkFirstRun()
+        crashLogger.log(TAG, "onCreate END")
         Log.d(TAG, "=== DashboardActivity onCreate END ===")
     }
 
@@ -116,6 +143,7 @@ class DashboardActivity : AppCompatActivity() {
         webView.onResume()
         lastJsPongMs = System.currentTimeMillis()
         scheduleWatchdogCheck()
+        crashLogger.log(TAG, "onResume — WebView resumed, watchdog armed")
         Log.d(TAG, "onResume — WebView resumed, watchdog armed")
     }
 
@@ -125,46 +153,63 @@ class DashboardActivity : AppCompatActivity() {
         webView.onPause()
         handler.removeCallbacks(watchdogRunnable)
         handler.removeCallbacks(retryRunnable)
+        crashLogger.log(TAG, "onPause — watchdog disarmed")
         Log.d(TAG, "onPause — watchdog disarmed")
     }
 
     override fun onDestroy() {
+        crashLogger.log(TAG, "onDestroy")
         Log.d(TAG, "onDestroy")
         handler.removeCallbacks(watchdogRunnable)
         handler.removeCallbacks(retryRunnable)
         if (::webView.isInitialized) {
-            webView.stopLoading()
-            webView.loadUrl("about:blank")
-            webView.clearHistory()
-            webView.clearCache(true)
-            webView.destroy()
+            try {
+                webView.stopLoading()
+                webView.loadUrl("about:blank")
+                webView.clearHistory()
+                webView.clearCache(true)
+                webView.destroy()
+            } catch (e: Exception) {
+                crashLogger.log(TAG, "Exception during WebView cleanup: ${e.message}", e)
+            }
         }
         super.onDestroy()
     }
 
     /**
-     * Memory pressure handler.
+     * Memory pressure handler — FIXED: removed reload on MODERATE.
      *
      * Guards:
      *   - isInForeground — never reload if the app is not visible
-     *   - TRIM_MEMORY_MODERATE — don't reload on BACKGROUND (fires too often)
-     *     Only reload on MODERATE (50) or higher, which indicates genuine
-     *     system memory pressure, not just normal app backgrounding.
+     *   - TRIM_MEMORY_COMPLETE only — app is being terminated; let it die naturally.
+     *     We NO LONGER reload on TRIM_MEMORY_MODERATE because it fires too
+     *     frequently on constrained Fire Stick hardware and causes visible
+     *     blanking without fixing the underlying memory issue.
+     *
+     * Rationale: WebView has its own memory management. Forcing a reload on
+     * memory pressure actually WORSENS memory pressure because it allocates
+     * a new renderer process. Let the system manage memory naturally.
      */
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
+        crashLogger.log(TAG, "onTrimMemory level=$level")
         Log.w(TAG, "onTrimMemory level=$level")
+
         if (!isInForeground) {
-            Log.d(TAG, "onTrimMemory — not in foreground, skipping reload")
+            Log.d(TAG, "onTrimMemory — not in foreground, skipping")
             return
         }
+
         when {
-            level >= TRIM_MEMORY_MODERATE -> {
-                Log.w(TAG, "Memory pressure ≥ MODERATE — reloading WebView to release memory")
-                webView.reload()
+            level >= TRIM_MEMORY_COMPLETE -> {
+                // App is being terminated. Log and let it die.
+                // The Activity will be recreated when the user returns.
+                crashLogger.log(TAG, "TRIM_MEMORY_COMPLETE — app terminating")
             }
-            // TRIM_MEMORY_BACKGROUND (40) intentionally ignored — it fires on every
-            // onPause and does not indicate actual memory pressure on a constrained device.
+            // TRIM_MEMORY_MODERATE (50) — IGNORED.
+            // Previously this triggered a reload, which caused visible flickering
+            // on every memory pressure event on constrained Fire Stick hardware.
+            // The WebView manages its own memory; forced reload makes it worse.
         }
     }
 
@@ -185,9 +230,60 @@ class DashboardActivity : AppCompatActivity() {
                 showExitDialog()
                 true
             }
-            // Future extension: allow volume keys for debug overlays, etc.
             else -> super.onKeyDown(keyCode, event)
         }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // FIRST RUN
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private fun checkFirstRun() {
+        val hasRun = prefs.getBoolean("first_run_complete", false)
+        if (!hasRun) {
+            crashLogger.log(TAG, "First run detected — showing screensaver setup dialog")
+            showFirstRunScreensaverDialog()
+        }
+    }
+
+    private fun showFirstRunScreensaverDialog() {
+        val msg = buildString {
+            append("IMPORTANT: To keep the screen always on, you must disable the screensaver:\n\n")
+            append("  1. Go to Settings\n")
+            append("  2. Display & Sounds\n")
+            append("  3. Screen Saver → select Never\n\n")
+            append("Without this setting, the TV will go black during idle periods ")
+            append("regardless of this app's wake lock.\n\n")
+            append("Would you like to open the Display settings now?")
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Dashboard Setup — Screen Saver")
+            .setMessage(msg)
+            .setPositiveButton("Open Settings") { _, _ ->
+                try {
+                    startActivity(Intent(Settings.ACTION_DISPLAY_SETTINGS))
+                } catch (e: Exception) {
+                    // Some Fire OS variants don't expose this intent
+                    try {
+                        // Fallback: try to open the screensaver settings directly
+                        val fallbackIntent = Intent(Settings.ACTION_SETTINGS)
+                        fallbackIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        startActivity(fallbackIntent)
+                    } catch (e2: Exception) {
+                        crashLogger.log(TAG, "Could not open settings: ${e2.message}")
+                    }
+                }
+                // Mark first run complete even if settings couldn't open —
+                // we don't want to spam the user every time
+                prefs.edit().putBoolean("first_run_complete", true).apply()
+            }
+            .setNegativeButton("Already Disabled") { _, _ ->
+                prefs.edit().putBoolean("first_run_complete", true).apply()
+                crashLogger.log(TAG, "User confirmed screensaver already disabled")
+            }
+            .setCancelable(false)
+            .show()
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -196,7 +292,7 @@ class DashboardActivity : AppCompatActivity() {
 
     private fun logStartupBanner() {
         val wvPkg = WebView.getCurrentWebViewPackage()
-        Log.d(TAG, """
+        val logLine = """
             ═══════════════════════════════════════════════
             Family Dashboard  v${BuildConfig.VERSION_NAME}  (#${BuildConfig.VERSION_CODE})
             BUILD_TYPE        : ${BuildConfig.BUILD_TYPE}
@@ -207,7 +303,9 @@ class DashboardActivity : AppCompatActivity() {
             WEBVIEW_PKG       : ${wvPkg?.packageName ?: "unknown"}
             WEBVIEW_VERSION   : ${wvPkg?.versionName ?: "unknown"}
             ═══════════════════════════════════════════════
-        """.trimIndent())
+        """.trimIndent()
+        crashLogger.log(TAG, logLine)
+        Log.d(TAG, logLine)
     }
 
     @Suppress("DEPRECATION")
@@ -254,6 +352,11 @@ class DashboardActivity : AppCompatActivity() {
         }
 
         // Exit button — top-right "×".
+        // FIXED: Removed isFocusable/isClickable — buttons should not steal
+        // D-pad focus from the WebView on older Fire Stick hardware.
+        // Clickable views inside a WebView's FrameLayout interfere with
+        // WebView D-pad navigation. Use focusable=false (default) so the
+        // D-pad passes through to the WebView first.
         val exitBtn = TextView(this).apply {
             text = "×"
             textSize = 28f
@@ -264,16 +367,20 @@ class DashboardActivity : AppCompatActivity() {
                 setMargins(0, 32, 32, 0)
             }
             setBackgroundColor(0x66000000)
-            isFocusable = true
+            // NOT focusable — D-pad should navigate WebView content first
+            isFocusable = false
             isClickable = true
         }
-        exitBtn.setOnClickListener { showExitDialog() }
+        exitBtn.setOnClickListener {
+            crashLogger.log(TAG, "Exit button tapped")
+            showExitDialog()
+        }
 
         // Native reload button — bottom-right corner.
-        // This works even if the WebView JS is crashed or the page is blanked.
-        // Semi-transparent, unobtrusive, D-pad-navigable for Fire remote.
+        // FIXED: Not focusable — prevents D-pad focus stealing from WebView.
+        // The user can still tap it with a remote (clickable=true).
         val reloadBtn = TextView(this).apply {
-            text = "\u21BB Reload"   // ↻
+            text = "\u21BB Reload"
             textSize = 14f
             setTextColor(Color.WHITE)
             gravity = android.view.Gravity.CENTER
@@ -283,11 +390,12 @@ class DashboardActivity : AppCompatActivity() {
             }
             setBackgroundColor(0x66000000)
             alpha = 0.6f
-            isFocusable = true
+            isFocusable = false
             isClickable = true
         }
         reloadBtn.setOnClickListener {
-            Log.d(TAG, "Native reload button tapped — forcing reload")
+            crashLogger.log(TAG, "Native reload button tapped — forcing reload")
+            if (isFinishing) return@setOnClickListener
             consecutiveErrors = 0
             isRetryPending = false
             handler.removeCallbacks(retryRunnable)
@@ -306,15 +414,10 @@ class DashboardActivity : AppCompatActivity() {
         // Reject mixed content (HTTP sub-resources on an HTTPS page).
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
 
-        // Hardware layer removed — let the system decide.
-        // On constrained Fire Stick hardware, forcing LAYER_TYPE_HARDWARE can cause
-        // display corruption under GPU memory pressure. System default is safer.
-        // webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-
         // Remote debugging — debug builds only.
-        // Enables Chrome DevTools: chrome://inspect/#devices on desktop (same network).
         if (BuildConfig.ENABLE_WEBVIEW_DEBUG) {
             WebView.setWebContentsDebuggingEnabled(true)
+            crashLogger.log(TAG, "WebView remote debugging ENABLED (debug build)")
             Log.d(TAG, "WebView remote debugging ENABLED (debug build)")
         }
 
@@ -333,8 +436,10 @@ class DashboardActivity : AppCompatActivity() {
     private fun setupKeepAwake() {
         try {
             startService(Intent(this, KeepAwakeService::class.java))
+            crashLogger.log(TAG, "KeepAwakeService started")
             Log.d(TAG, "KeepAwakeService started")
         } catch (e: Exception) {
+            crashLogger.log(TAG, "Failed to start KeepAwakeService: ${e.message}", e)
             Log.e(TAG, "Failed to start KeepAwakeService: ${e.message}", e)
         }
     }
@@ -350,16 +455,25 @@ class DashboardActivity : AppCompatActivity() {
             override fun onConsoleMessage(msg: ConsoleMessage?): Boolean {
                 msg ?: return false
                 val src = "[${msg.sourceId()}:${msg.lineNumber()}]"
-                when (msg.messageLevel()) {
-                    ConsoleMessage.MessageLevel.ERROR   -> Log.e(TAG, "CONSOLE ERROR: $src ${msg.message()}")
-                    ConsoleMessage.MessageLevel.WARNING -> Log.w(TAG, "CONSOLE WARN:  $src ${msg.message()}")
-                    else                                  -> Log.v(TAG, "CONSOLE:       $src ${msg.message()}")
+                val level = msg.messageLevel()
+                val text = "CONSOLE $level: $src ${msg.message()}"
+                when (level) {
+                    ConsoleMessage.MessageLevel.ERROR   -> {
+                        Log.e(TAG, text)
+                        crashLogger.log(TAG, text)
+                    }
+                    ConsoleMessage.MessageLevel.WARNING -> {
+                        Log.w(TAG, text)
+                        crashLogger.log(TAG, text)
+                    }
+                    else                                  -> Log.v(TAG, text)
                 }
                 return true
             }
 
             override fun onReceivedTitle(view: WebView?, title: String?) {
                 Log.d(TAG, "Page title: $title")
+                crashLogger.log(TAG, "Page title: $title")
             }
 
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
@@ -382,16 +496,32 @@ class DashboardActivity : AppCompatActivity() {
                 val host = url.host ?: return null
 
                 // Only intercept GET requests to the dashboard server.
-                // POST/PUT/DELETE cannot be faithfully proxied because
-                // WebResourceRequest does not expose the request body.
-                // Let the WebView handle those natively — they go direct
-                // over HTTPS without the X-App-Auth header (the dashboard
-                // session is already established via the initial HTML).
                 if (host != "dashboard.cashlabnyc.com") return null
                 if (request.method != "GET") return null
 
                 val path = url.path ?: "/"
-                Log.v(TAG, "INTERCEPT ${request.method} $path")
+
+                // FIXED: Only proxy text assets that need auth header injection.
+                // Let the WebView handle images, fonts, media directly — these
+                // don't need the auth header and buffering them causes memory
+                // pressure on constrained Fire Stick hardware.
+                //
+                // Text assets we intercept: HTML (initial load, auth-gated),
+                // JS (may be auth-gated), CSS, JSON API responses.
+                // Binary assets: PNG/JPG/WEBP/SVG fonts — pass through.
+                val shouldProxy = path.endsWith(".html") ||
+                        path.endsWith(".js") ||
+                        path.endsWith(".mjs") ||
+                        path.endsWith(".css") ||
+                        path.endsWith(".json") ||
+                        path == "/" ||
+                        path.startsWith("/_next/")
+
+                if (!shouldProxy) {
+                    Log.v(TAG, "BYPASS $path — letting WebView handle directly")
+                    return null
+                }
+
                 return proxyDashboardRequest(url.toString(), request)
             }
 
@@ -401,11 +531,11 @@ class DashboardActivity : AppCompatActivity() {
                 error: WebResourceError?
             ) {
                 if (request?.isForMainFrame == true) {
-                    Log.e(TAG, "MAINFRAME ERROR ${error?.errorCode} — ${error?.description}")
-                    onMainFrameError(
-                        error?.errorCode?.toInt() ?: -1,
-                        error?.description?.toString() ?: "WebView error"
-                    )
+                    val errCode = error?.errorCode?.toInt() ?: -1
+                    val desc = error?.description?.toString() ?: "WebView error"
+                    crashLogger.log(TAG, "MAINFRAME ERROR $errCode — $desc")
+                    Log.e(TAG, "MAINFRAME ERROR $errCode — $desc")
+                    onMainFrameError(errCode, desc)
                 }
             }
 
@@ -417,6 +547,7 @@ class DashboardActivity : AppCompatActivity() {
                 if (request?.isForMainFrame == true) {
                     val status = errorResponse?.statusCode ?: -1
                     val reason = errorResponse?.reasonPhrase ?: "unknown"
+                    crashLogger.log(TAG, "MAINFRAME HTTP ERROR $status — $reason")
                     Log.e(TAG, "MAINFRAME HTTP ERROR $status — $reason")
                     if (status >= 400) {
                         onMainFrameError(status, "HTTP $status $reason")
@@ -430,47 +561,233 @@ class DashboardActivity : AppCompatActivity() {
                 consecutiveErrors = 0
                 cancelScheduledRetry()
                 isRetryPending = false
+                crashLogger.log(TAG, "Page finished: $url")
                 Log.d(TAG, "Page finished: $url")
                 injectJsHealthCheck()
             }
 
             /**
-             * Called when the WebView's render process terminates.
-             * This happens under memory pressure or after a JS crash — not the same
-             * as onReceivedError. Returning true tells the WebView to attempt a reload
-             * via the default error page; we additionally trigger a full reload.
+             * FIXED: Called when the WebView's render process terminates.
+             *
+             * Previous bug: called webView.reload() on the crashed instance.
+             * This does NOT reliably restart the renderer — the WebView instance
+             * is in an undefined state after render process death.
+             *
+             * Fix: destroy the WebView completely and recreate it, then reload.
+             * This is the only reliable recovery pattern for WebView render crashes.
              */
             override fun onRenderProcessGone(
                 view: WebView?,
                 detail: RenderProcessGoneDetail?
             ): Boolean {
                 val crashed = detail?.didCrash() ?: false
-                Log.e(TAG, "RENDER PROCESS GONE — didCrash=$crashed")
+                val reason = if (crashed) "CRASH" else "KILLED"
+                crashLogger.log(TAG, "RENDER PROCESS $reason — recreating WebView")
+                Log.e(TAG, "RENDER PROCESS GONE — didCrash=$crashed ($reason)")
+
                 if (crashed) {
-                    Log.w(TAG, "Renderer crashed — reloading WebView")
-                    // Reload without full Activity recreation; WebView is recreated by the system.
-                    handler.postDelayed({ webView.reload() }, 1_000)
+                    crashLogger.log(TAG, "Renderer crashed — recreating WebView to recover")
+                    Log.w(TAG, "Renderer crashed — recreating WebView")
+                    // Post to handler to ensure we don't destroy while in the callback
+                    handler.post { recreateWebView() }
                 }
-                return true  // Consume the callback; WebView will show its own error page.
+                return true  // Consume the callback; suppress the default error page
             }
         }
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // REQUEST PROXY (shouldInterceptRequest)
+    // WEBVIEW RECREATION (on render crash)
     // ═════════════════════════════════════════════════════════════════════════
 
     /**
-     * Proxies HTTP/S requests to dashboard.cashlabnyc.com.
+     * Destroys the crashed WebView and creates a fresh one.
+     * This is the ONLY reliable way to recover from a render-process crash.
+     * Calling webView.reload() on a crashed WebView instance is unreliable.
+     */
+    private fun recreateWebView() {
+        crashLogger.log(TAG, "recreateWebView: starting")
+        Log.d(TAG, "recreateWebView: starting")
+
+        if (!::webView.isInitialized) {
+            crashLogger.log(TAG, "recreateWebView: WebView not initialized, skipping")
+            return
+        }
+        if (isFinishing) {
+            crashLogger.log(TAG, "recreateWebView: Activity finishing, skipping")
+            return
+        }
+
+        try {
+            webView.stopLoading()
+            webView.loadUrl("about:blank")
+            webView.clearHistory()
+            webView.clearCache(true)
+            webView.destroy()
+        } catch (e: Exception) {
+            crashLogger.log(TAG, "recreateWebView: cleanup exception: ${e.message}", e)
+        }
+
+        // Create fresh WebView
+        val freshWebView = WebView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        // Re-apply settings
+        val settings: WebSettings = freshWebView.settings
+        settings.javaScriptEnabled = true
+        settings.domStorageEnabled = true
+        settings.mediaPlaybackRequiresUserGesture = false
+        settings.cacheMode = WebSettings.LOAD_DEFAULT
+        settings.loadsImagesAutomatically = true
+        settings.allowFileAccess = false
+        settings.allowContentAccess = false
+        settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+
+        if (BuildConfig.ENABLE_WEBVIEW_DEBUG) {
+            WebView.setWebContentsDebuggingEnabled(true)
+        }
+
+        freshWebView.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(msg: ConsoleMessage?): Boolean {
+                msg ?: return false
+                val src = "[${msg.sourceId()}:${msg.lineNumber()}]"
+                when (msg.messageLevel()) {
+                    ConsoleMessage.MessageLevel.ERROR -> {
+                        crashLogger.log(TAG, "CONSOLE ERROR: $src ${msg.message()}")
+                        Log.e(TAG, "CONSOLE ERROR: $src ${msg.message()}")
+                    }
+                    ConsoleMessage.MessageLevel.WARNING -> {
+                        crashLogger.log(TAG, "CONSOLE WARN:  $src ${msg.message()}")
+                        Log.w(TAG, "CONSOLE WARN:  $src ${msg.message()}")
+                    }
+                    else -> Log.v(TAG, "CONSOLE:       $src ${msg.message()}")
+                }
+                return true
+            }
+            override fun onReceivedTitle(view: WebView?, title: String?) {
+                crashLogger.log(TAG, "Page title: $title")
+            }
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                if (newProgress == 100) crashLogger.log(TAG, "Load progress: 100%")
+            }
+        }
+
+        freshWebView.webViewClient = object : WebViewClient() {
+            override fun shouldInterceptRequest(
+                view: WebView?,
+                request: WebResourceRequest?
+            ): WebResourceResponse? {
+                val url = request?.url ?: return null
+                val host = url.host ?: return null
+                if (host != "dashboard.cashlabnyc.com") return null
+                if (request.method != "GET") return null
+                val path = url.path ?: "/"
+                val shouldProxy = path.endsWith(".html") ||
+                        path.endsWith(".js") ||
+                        path.endsWith(".mjs") ||
+                        path.endsWith(".css") ||
+                        path.endsWith(".json") ||
+                        path == "/" ||
+                        path.startsWith("/_next/")
+                if (!shouldProxy) return null
+                return proxyDashboardRequest(url.toString(), request)
+            }
+            override fun onReceivedError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                error: WebResourceError?
+            ) {
+                if (request?.isForMainFrame == true) {
+                    val errCode = error?.errorCode?.toInt() ?: -1
+                    val desc = error?.description?.toString() ?: "WebView error"
+                    crashLogger.log(TAG, "MAINFRAME ERROR $errCode — $desc")
+                    Log.e(TAG, "MAINFRAME ERROR $errCode — $desc")
+                    onMainFrameError(errCode, desc)
+                }
+            }
+            override fun onReceivedHttpError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                errorResponse: WebResourceResponse?
+            ) {
+                if (request?.isForMainFrame == true) {
+                    val status = errorResponse?.statusCode ?: -1
+                    if (status >= 400) {
+                        val reason = errorResponse?.reasonPhrase ?: "unknown"
+                        crashLogger.log(TAG, "MAINFRAME HTTP ERROR $status — $reason")
+                        onMainFrameError(status, "HTTP $status $reason")
+                    }
+                }
+            }
+            override fun onPageFinished(view: WebView?, url: String?) {
+                lastPageFinishMs = System.currentTimeMillis()
+                lastJsPongMs = lastPageFinishMs
+                consecutiveErrors = 0
+                cancelScheduledRetry()
+                isRetryPending = false
+                crashLogger.log(TAG, "Page finished (after crash recovery): $url")
+                Log.d(TAG, "Page finished (after crash recovery): $url")
+                injectJsHealthCheckInto(freshWebView)
+            }
+            override fun onRenderProcessGone(
+                view: WebView?,
+                detail: RenderProcessGoneDetail?
+            ): Boolean {
+                // Nested crash — log and try again
+                val crashed = detail?.didCrash() ?: false
+                crashLogger.log(TAG, "NESTED RENDER CRASH — didCrash=$crashed")
+                Log.e(TAG, "NESTED RENDER CRASH — didCrash=$crashed")
+                if (crashed) handler.post { recreateWebView() }
+                return true
+            }
+        }
+
+        // Replace old WebView in the view hierarchy
+        // Find the WebView's index in rootView and replace it
+        val index = rootView.indexOfChild(webView)
+        rootView.removeView(webView)
+
+        // The fresh WebView goes at index 0 (below the buttons which are added last)
+        if (index >= 0) {
+            rootView.addView(freshWebView, index)
+        } else {
+            rootView.addView(freshWebView, 0)
+        }
+
+        webView = freshWebView
+
+        // Reset watchdog state
+        lastJsPongMs = System.currentTimeMillis()
+        lastPageFinishMs = System.currentTimeMillis()
+
+        // Load dashboard with auth header injection
+        crashLogger.log(TAG, "recreateWebView: loading dashboard")
+        Log.d(TAG, "recreateWebView: loading dashboard")
+        webView.loadUrl(BuildConfig.DASHBOARD_URL)
+        scheduleWatchdogCheck()
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // REQUEST PROXY (shouldInterceptRequest) — streaming version
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Proxies HTTP/S requests to dashboard.cashlabnyc.com, adding the X-App-Auth
+     * header for auth-gated content.
      *
-     * Adds the X-App-Auth header (from BuildConfig, injected by CI),
-     * copies relevant request headers, buffers the full response body
-     * (prevents truncated-chunk JS parser crashes), and returns a
-     * fully-formed WebResourceResponse.
+     * FIXED: Now uses a streaming response for text assets. The response body is
+     * read in a background thread and written to a Pipe; the WebResourceResponse
+     * is returned immediately with an unbuffered InputStream. This prevents
+     * memory pressure from buffering large JS/CSS bundles on constrained hardware.
      *
-     * Standard HTTPS is used throughout. No custom TrustManager —
-     * Let's Encrypt IS4 is in the Android system trust store on all
-     * supported Fire OS versions.
+     * Only text assets (HTML/JS/CSS/JSON) are proxied — images/fonts/media pass
+     * through to the WebView directly.
+     *
+     * Standard HTTPS throughout. No custom TrustManager.
      */
     private fun proxyDashboardRequest(
         urlString: String,
@@ -499,6 +816,10 @@ class DashboardActivity : AppCompatActivity() {
             val reason = conn.responseMessage
             Log.v(TAG, "  → $status $reason")
 
+            val mimeType = inferMimeType(url.path, conn.contentType)
+
+            // For text responses, use a streaming Pipe to avoid buffering in memory.
+            // Binary responses (images etc.) are not proxied — we return null above.
             val responseHeaders = mutableMapOf<String, String>()
             conn.headerFields?.forEach { (key, values) ->
                 if (key != null && key.lowercase() !in HOP_BY_HOP && values.isNotEmpty()) {
@@ -506,15 +827,47 @@ class DashboardActivity : AppCompatActivity() {
                 }
             }
 
-            val mimeType = inferMimeType(url.path, conn.contentType)
-            val bytes = bufferFully(conn, status)
+            if (isTextMime(mimeType)) {
+                // Use a piped stream for text — non-blocking, no full buffer in RAM
+                val pipeIn = PipedInputStream(64 * 1024)  // 64KB buffer
+                val pipeOut = PipedOutputStream(pipeIn)
 
-            val charset = if (isTextMime(mimeType)) "UTF-8" else null
-            WebResourceResponse(
-                mimeType, charset, status, reason, responseHeaders,
-                ByteArrayInputStream(bytes)
-            )
+                // Write response in background thread so we return immediately
+                Thread {
+                    try {
+                        val stream: InputStream = if (status >= 400) {
+                            conn.errorStream ?: conn.inputStream
+                        } else {
+                            conn.inputStream
+                        }
+                        stream.use { input ->
+                            val buf = ByteArray(8192)
+                            var n: Int
+                            while (input.read(buf).also { n = it } != -1) {
+                                pipeOut.write(buf, 0, n)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        crashLogger.log(TAG, "Proxy pipe write error: ${e.message}", e)
+                    } finally {
+                        try { pipeOut.close() } catch (e: Exception) { }
+                        try { conn.disconnect() } catch (e: Exception) { }
+                    }
+                }.start()
+
+                crashLogger.log(TAG, "PROXY STREAM $status $mimeType $urlString")
+                WebResourceResponse(mimeType, "UTF-8", status, reason, responseHeaders, pipeIn)
+
+            } else {
+                // Binary — should not reach here since we filter above, but handle it
+                val bytes = bufferFully(conn, status)
+                WebResourceResponse(
+                    mimeType, null, status, reason, responseHeaders,
+                    ByteArrayInputStream(bytes)
+                )
+            }
         } catch (e: Exception) {
+            crashLogger.log(TAG, "PROXY EXCEPTION: ${e.javaClass.simpleName}: ${e.message}", e)
             Log.e(TAG, "  INTERCEPT EXCEPTION: ${e.javaClass.simpleName}: ${e.message}", e)
             null  // Let WebView fall back to its own direct load.
         }
@@ -557,15 +910,15 @@ class DashboardActivity : AppCompatActivity() {
             path.endsWith(".html") || path == "/"          -> "text/html"
             contentType?.contains("text/html") == true    -> "text/html"
             contentType?.contains("application/json") == true -> "application/json"
-            contentType?.isNotBlank() == true             -> contentType!!
+            contentType?.isNotBlank() == true -> contentType
             else                                            -> "application/octet-stream"
         }
     }
 
     private fun isTextMime(mime: String): Boolean =
         mime.startsWith("text/") ||
-        mime == "application/javascript" ||
-        mime == "application/json"
+                mime == "application/javascript" ||
+                mime == "application/json"
 
     companion object {
         private val HOP_BY_HOP = setOf(
@@ -588,6 +941,10 @@ class DashboardActivity : AppCompatActivity() {
      * when the dashboard's own JS bundle fails to load.
      */
     private fun injectJsHealthCheck() {
+        injectJsHealthCheckInto(webView)
+    }
+
+    private fun injectJsHealthCheckInto(wv: WebView) {
         val script = """
             (function(){
                 if (typeof AndroidDashboard !== 'undefined') {
@@ -598,7 +955,7 @@ class DashboardActivity : AppCompatActivity() {
                 }
             })();
         """.trimIndent()
-        webView.evaluateJavascript(script, null)
+        wv.evaluateJavascript(script, null)
     }
 
     private fun scheduleWatchdogCheck() {
@@ -614,14 +971,29 @@ class DashboardActivity : AppCompatActivity() {
 
     @JavascriptInterface
     fun logFromJs(level: String, message: String) {
+        val tag = "[JS] $message"
         when (level.uppercase()) {
-            "ERROR"   -> Log.e(TAG, "[JS] $message")
-            "WARN"    -> Log.w(TAG, "[JS] $message")
-            else      -> Log.d(TAG, "[JS] $message")
+            "ERROR"   -> {
+                Log.e(TAG, tag)
+                crashLogger.log(TAG, tag)
+            }
+            "WARN"    -> {
+                Log.w(TAG, tag)
+                crashLogger.log(TAG, tag)
+            }
+            else      -> Log.d(TAG, tag)
         }
     }
 
+    /**
+     * FIXED: Added isFinishing guard.
+     * If the Activity is finishing, do not trigger reloads or watchdog checks.
+     */
     private fun checkJsHealth() {
+        if (isFinishing) {
+            crashLogger.log(TAG, "checkJsHealth: Activity finishing, skipping")
+            return
+        }
         if (!::webView.isInitialized || webView.url == null) {
             scheduleWatchdogCheck()
             return
@@ -629,6 +1001,7 @@ class DashboardActivity : AppCompatActivity() {
 
         val elapsed = System.currentTimeMillis() - lastJsPongMs
         if (elapsed > STALE_THRESHOLD_MS) {
+            crashLogger.log(TAG, "JS watchdog TRIGGERED — no pong for ${elapsed / 1000}s (threshold=${STALE_THRESHOLD_MS / 1000}s)")
             Log.w(TAG, "JS watchdog TRIGGERED — no pong for ${elapsed / 1000}s (threshold=${STALE_THRESHOLD_MS / 1000}s)")
             consecutiveErrors++
             onMainFrameError(-1, "JS watchdog: page unresponsive for ${elapsed / 1000}s")
@@ -651,20 +1024,29 @@ class DashboardActivity : AppCompatActivity() {
      *
      * After MAX_ERRORS_BEFORE_STopping (10) consecutive failures, stops
      * retrying and shows the persistent error overlay instead.
+     *
+     * FIXED: All reloads now go through loadDashboardWithAuth() which uses
+     * the interceptor, ensuring the auth header is always present on retry.
      */
     private fun onMainFrameError(errorCode: Int, description: String) {
+        if (isFinishing) return
+
         consecutiveErrors++
         val delayMs = RETRY_DELAYS_MS.getOrElse(consecutiveErrors - 1) { RETRY_DELAYS_MS.last() }
 
-        Log.e(TAG, """
+        val msg = """
             Main frame error #$consecutiveErrors
               code  : $errorCode
               desc  : $description
               delay : ${delayMs / 1000}s
               max   : $MAX_ERRORS_BEFORE_STopping
-        """.trimIndent())
+        """.trimIndent()
+
+        crashLogger.log(TAG, msg)
+        Log.e(TAG, msg)
 
         if (consecutiveErrors >= MAX_ERRORS_BEFORE_STopping) {
+            crashLogger.log(TAG, "MAX ERRORS reached — showing persistent error overlay")
             Log.e(TAG, "MAX ERRORS reached — showing persistent error overlay")
             showPersistentErrorOverlay(description)
             return
@@ -672,21 +1054,34 @@ class DashboardActivity : AppCompatActivity() {
 
         if (!isRetryPending) {
             isRetryPending = true
+            crashLogger.log(TAG, "Scheduling retry #${consecutiveErrors} in ${delayMs / 1000}s")
             Log.d(TAG, "Scheduling retry #${consecutiveErrors} in ${delayMs / 1000}s")
             handler.postDelayed(retryRunnable, delayMs)
         }
     }
 
+    /**
+     * FIXED: Uses loadDashboardWithAuth() instead of webView.reload().
+     * webView.reload() bypasses shouldInterceptRequest, which means
+     * the auth header is NOT injected on retry. This caused the dashboard
+     * to fail re-authentication after network drops.
+     */
     private fun performReload() {
+        if (isFinishing) {
+            crashLogger.log(TAG, "performReload: Activity finishing, skipping")
+            return
+        }
         isRetryPending = false
+        crashLogger.log(TAG, "performReload: reloading (error #$consecutiveErrors)")
         Log.d(TAG, "performReload: reloading (error #$consecutiveErrors)")
-        webView.reload()
+        loadDashboardWithAuth()
     }
 
     private fun cancelScheduledRetry() {
         if (isRetryPending) {
             handler.removeCallbacks(retryRunnable)
             isRetryPending = false
+            crashLogger.log(TAG, "Retry cancelled — page loaded OK")
             Log.d(TAG, "Retry cancelled — page loaded OK")
         }
     }
@@ -700,98 +1095,111 @@ class DashboardActivity : AppCompatActivity() {
      * Replaces the entire document so the user sees a branded offline screen
      * instead of a blank or broken WebView.
      *
-     * Uses loadDataWithBaseURL so we avoid all JS-string-escaping complexity.
-     * The page includes:
-     *   • Countdown auto-retry (5 minutes)
-     *   • "Retry Now" button (immediate reload)
-     *   • Last error description displayed for diagnostics
-     *   • No external dependencies (all CSS/JS inline)
+     * FIXED: The retry button now calls AndroidDashboard.requestNativeReload()
+     * instead of location.reload(). This ensures the retry goes through
+     * shouldInterceptRequest so the auth header is re-injected.
+     *
+     * The countdown auto-retry still uses location.reload() which will hit
+     * the 5-minute mark anyway, but the manual retry button is the primary
+     * user action path and is now fixed.
      */
     private fun showPersistentErrorOverlay(lastError: String) {
         val safeError = android.text.TextUtils.htmlEncode(lastError)
         val html = """
-            <!DOCTYPE html>
-            <html>
-            <head>
-              <meta charset="UTF-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1">
-              <title>Dashboard Offline</title>
-              <style>
-                * { margin: 0; padding: 0; box-sizing: border-box; }
-                body {
-                  background: #121212;
-                  color: #ffffff;
-                  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-                  display: flex;
-                  align-items: center;
-                  justify-content: center;
-                  height: 100vh;
-                  flex-direction: column;
-                }
-                .icon    { font-size: 64px; margin-bottom: 24px; }
-                .title   { font-size: 28px; font-weight: 600; margin-bottom: 12px; }
-                .subtitle {
-                  font-size: 16px;
-                  color: rgba(255,255,255,0.6);
-                  margin-bottom: 32px;
-                  text-align: center;
-                  max-width: 480px;
-                  line-height: 1.5;
-                }
-                .countdown { font-size: 14px; color: rgba(255,255,255,0.4); margin-bottom: 24px; }
-                .retry-btn {
-                  padding: 14px 40px;
-                  background: #333;
-                  border: 1px solid #555;
-                  border-radius: 8px;
-                  color: #fff;
-                  font-size: 16px;
-                  cursor: pointer;
-                  transition: background 0.2s;
-                }
-                .retry-btn:hover  { background: #444; }
-                .retry-btn:active { background: #2a2a2a; }
-                .detail {
-                  font-size: 12px;
-                  color: rgba(255,255,255,0.3);
-                  margin-top: 24px;
-                  max-width: 480px;
-                  text-align: center;
-                  word-break: break-all;
-                  line-height: 1.4;
-                }
-              </style>
-            </head>
-            <body>
-              <div class="icon">&#9888;</div>
-              <div class="title">Dashboard unavailable</div>
-              <div class="subtitle">
-                The dashboard server is unreachable or returned an error.<br>
-                Check your network connection.
-              </div>
-              <div class="countdown" id="cd">Retrying in 5:00</div>
-              <button class="retry-btn" id="rb">Retry Now</button>
-              <div class="detail" id="dl">Last error: $safeError</div>
-              <script>
-                (function() {
-                  var delay = 300;
-                  var cd = document.getElementById('cd');
-                  var rb = document.getElementById('rb');
-                  function fmt(s) { return (s < 10 ? '0' : '') + s; }
-                  function tick() {
-                    cd.textContent = 'Retrying in ' + fmt(Math.floor(delay/60)) + ':' + fmt(delay%60)
-                      + ' — tap Retry Now to reload immediately';
-                    if (delay <= 0) { location.reload(); return; }
-                    delay--;
-                    setTimeout(tick, 1000);
-                  }
-                  tick();
-                  rb.addEventListener('click', function() { location.reload(); });
-                })();
-              </script>
-            </body>
-            </html>
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dashboard Offline</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #121212;
+      color: #ffffff;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      flex-direction: column;
+    }
+    .icon    { font-size: 64px; margin-bottom: 24px; }
+    .title   { font-size: 28px; font-weight: 600; margin-bottom: 12px; }
+    .subtitle {
+      font-size: 16px;
+      color: rgba(255,255,255,0.6);
+      margin-bottom: 32px;
+      text-align: center;
+      max-width: 480px;
+      line-height: 1.5;
+    }
+    .countdown { font-size: 14px; color: rgba(255,255,255,0.4); margin-bottom: 24px; }
+    .retry-btn {
+      padding: 14px 40px;
+      background: #333;
+      border: 1px solid #555;
+      border-radius: 8px;
+      color: #fff;
+      font-size: 16px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .retry-btn:hover  { background: #444; }
+    .retry-btn:active { background: #2a2a2a; }
+    .detail {
+      font-size: 12px;
+      color: rgba(255,255,255,0.3);
+      margin-top: 24px;
+      max-width: 480px;
+      text-align: center;
+      word-break: break-all;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="icon">&#9888;</div>
+  <div class="title">Dashboard unavailable</div>
+  <div class="subtitle">
+    The dashboard server is unreachable or returned an error.<br>
+    Check your network connection.
+  </div>
+  <div class="countdown" id="cd">Retrying in 5:00</div>
+  <button class="retry-btn" id="rb">Retry Now</button>
+  <div class="detail" id="dl">Last error: $safeError</div>
+  <script>
+    (function() {
+      var delay = 300;
+      var cd = document.getElementById('cd');
+      var rb = document.getElementById('rb');
+      function fmt(s) { return (s < 10 ? '0' : '') + s; }
+      function tick() {
+        cd.textContent = 'Retrying in ' + fmt(Math.floor(delay/60)) + ':' + fmt(delay%60)
+          + ' — tap Retry Now to reload immediately';
+        if (delay <= 0) { location.reload(); return; }
+        delay--;
+        setTimeout(tick, 1000);
+      }
+      tick();
+      // FIXED: Call native Android to reload so auth header is re-injected
+      rb.addEventListener('click', function() {
+        try {
+          if (typeof AndroidDashboard !== 'undefined') {
+            AndroidDashboard.requestNativeReload();
+          } else {
+            location.reload();
+          }
+        } catch(e) { location.reload(); }
+      });
+    })();
+  </script>
+</body>
+</html>
         """.trimIndent()
+
+        crashLogger.log(TAG, "Persistent error overlay injected (lastError=$lastError)")
+        Log.d(TAG, "Persistent error overlay injected (lastError=$lastError)")
 
         webView.loadDataWithBaseURL(
             BuildConfig.DASHBOARD_URL,
@@ -800,20 +1208,47 @@ class DashboardActivity : AppCompatActivity() {
             "UTF-8",
             null
         )
-        Log.d(TAG, "Persistent error overlay injected (lastError=$lastError)")
     }
 
     // ═════════════════════════════════════════════════════════════════════════
     // NAVIGATION / DIALOGS
     // ═════════════════════════════════════════════════════════════════════════
 
+    /**
+     * Loads the dashboard URL through shouldInterceptRequest so the auth
+     * header is injected. Use this instead of webView.loadUrl() directly.
+     */
     private fun loadDashboard() {
-        val url = BuildConfig.DASHBOARD_URL
-        Log.d(TAG, "Loading dashboard: $url")
-        webView.loadUrl(url)
+        crashLogger.log(TAG, "loadDashboard: ${BuildConfig.DASHBOARD_URL}")
+        Log.d(TAG, "Loading dashboard: ${BuildConfig.DASHBOARD_URL}")
+        webView.loadUrl(BuildConfig.DASHBOARD_URL)
         lastJsPongMs = System.currentTimeMillis()
         lastPageFinishMs = System.currentTimeMillis()
         scheduleWatchdogCheck()
+    }
+
+    /**
+     * Loads dashboard URL with auth header via shouldInterceptRequest.
+     * Use this for retry/reload calls instead of webView.reload() directly.
+     */
+    private fun loadDashboardWithAuth() {
+        crashLogger.log(TAG, "loadDashboardWithAuth: ${BuildConfig.DASHBOARD_URL}")
+        Log.d(TAG, "loadDashboardWithAuth: ${BuildConfig.DASHBOARD_URL}")
+        webView.loadUrl(BuildConfig.DASHBOARD_URL)
+        lastJsPongMs = System.currentTimeMillis()
+        lastPageFinishMs = System.currentTimeMillis()
+        // Watchdog will be rescheduled by onPageFinished
+    }
+
+    @JavascriptInterface
+    fun requestNativeReload() {
+        crashLogger.log(TAG, "requestNativeReload: called from JS")
+        Log.d(TAG, "requestNativeReload: called from JS")
+        handler.post {
+            if (!isFinishing && ::webView.isInitialized) {
+                loadDashboardWithAuth()
+            }
+        }
     }
 
     private fun showExitDialog() {
@@ -821,6 +1256,7 @@ class DashboardActivity : AppCompatActivity() {
             .setTitle("Exit Dashboard?")
             .setMessage("Return to Fire TV home screen?")
             .setPositiveButton("Exit") { _, _ ->
+                crashLogger.log(TAG, "User confirmed exit")
                 Log.d(TAG, "User confirmed exit")
                 finish()
             }

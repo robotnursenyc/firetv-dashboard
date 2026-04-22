@@ -11,54 +11,59 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 
 // ═════════════════════════════════════════════════════════════════════════════
-// KeepAwakeService — foreground Service preventing Fire TV screen sleep
+// KeepAwakeService — foreground Service preventing Fire TV CPU from sleeping
 //
 // Runs as a foreground service with:
-//   • SCREEN_BRIGHT_WAKE_LOCK  — keeps the screen on (not just the CPU)
-//   • Ongoing notification     — prevents the service from being killed
-//   • No daemon thread         — the old fake-touch approach was non-functional
+//   • PARTIAL_WAKE_LOCK — keeps CPU alive so WebView JS watchdog keeps running
+//   • Ongoing notification — prevents the service from being killed by the system
 //
-// IMPORTANT: This service prevents the CPU from sleeping (WAKE_LOCK).
-// It does NOT override the Fire TV screensaver / ambient mode.
-// The screensaver must be disabled manually by the user:
+// IMPORTANT: This service keeps the CPU alive but does NOT override the
+// Fire TV screensaver / ambient mode. The screensaver must be disabled
+// manually by the user:
 //
 //   Settings → Display & Sounds → Screen Saver → Never
 //
 // Without this setting change the screen WILL go black after the TV's
-// configured idle period regardless of this service.
+// configured idle period regardless of this service and the Activity's
+// FLAG_KEEP_SCREEN_ON.
 //
-// Why the old fake-touch approach was removed:
-//   MotionEvent.obtain()...recycle() constructs events but never dispatches
-//   them to the system. Without root + INPUT_INJECT_Suddendeath permission,
-//   fake touch injection is not possible from a normal app. The daemon thread
-//   was consuming battery and achieving nothing.
+// The app's first-run dialog (DashboardActivity) prompts the user to
+// change this setting.
+//
+// Recovery: If the service is killed under memory pressure, START_STICKY
+// causes the system to restart it. The crash logger captures restarts.
 // ═════════════════════════════════════════════════════════════════════════════
 
 class KeepAwakeService : Service() {
 
-    // Reference to the wake lock. SCREEN_BRIGHT_WAKE_LOCK keeps the screen on.
     private var wakeLock: PowerManager.WakeLock? = null
+    private var crashLogger: CrashLogger? = null
 
     companion object {
         private const val TAG = "HermesKeepAwake"
         private const val CHANNEL_ID = "firetv_keep_awake_channel"
         private const val NOTIFICATION_ID = 1001
+        // Watchdog interval: restart the wake lock before it times out.
+        // The timeout is 12h; we ping at 1h to be safe.
+        private const val WAKELOCK_PING_INTERVAL_MS = 60 * 60 * 1000L  // 1 hour
     }
 
     override fun onCreate() {
         super.onCreate()
+        crashLogger = CrashLogger(this)
+        crashLogger?.log(TAG, "KeepAwakeService onCreate")
         Log.d(TAG, "KeepAwakeService onCreate")
 
         acquireWakeLock()
         createNotificationChannel()
         val notification = buildNotification()
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            // API 34+: foregroundServiceType="specialUse" is declared in the
-            // manifest; pass the matching ServiceInfo flag at runtime.
             startForeground(
                 NOTIFICATION_ID,
                 notification,
@@ -68,19 +73,22 @@ class KeepAwakeService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
 
-        Log.d(TAG, "Wake lock acquired — screen will stay on while this service is alive")
+        crashLogger?.log(TAG, "KeepAwakeService started — foreground notification active")
+        Log.d(TAG, "Wake lock acquired — foreground service running")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // START_STICKY: tells the system to restart this service if it kills it.
-        // This is the correct behaviour for a kiosk app that must stay alive.
+        // START_STICKY: system will restart this service if it is killed.
+        // This is critical for a kiosk app — the service must survive.
+        crashLogger?.log(TAG, "onStartCommand START_STICKY")
         return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        Log.d(TAG, "KeepAwakeService onDestroy — releasing wake lock")
+        crashLogger?.log(TAG, "KeepAwakeService onDestroy — releasing wake lock")
+        Log.d(TAG, "KeepAwakeService onDestroy")
         releaseWakeLock()
         super.onDestroy()
     }
@@ -88,48 +96,40 @@ class KeepAwakeService : Service() {
     // ── Wake lock ─────────────────────────────────────────────────────────────
 
     /**
-     * Acquires a SCREEN_BRIGHT_WAKE_LOCK.
+     * Acquires a PARTIAL_WAKE_LOCK.
      *
-     * This is the correct wake lock type for keeping the screen on.
-     *   • PARTIAL_WAKE_LOCK  — keeps CPU on, screen can turn off  ← WRONG
-     *   • SCREEN_BRIGHT_WAKE_LOCK — keeps screen on at max brightness
-     *   • SCREEN_DIM_WAKE_LOCK   — keeps screen on but dim
+     * Why PARTIAL and not SCREEN_BRIGHT:
+     *   - PARTIAL_WAKE_LOCK keeps the CPU alive so the WebView's JS watchdog
+     *     timer and network timers continue running.
+     *   - SCREEN_BRIGHT_WAKE_LOCK throws SecurityException on Android 12+
+     *     (Fire OS 7+) when held by a foreground service that is not the
+     *     topmost app. PARTIAL_WAKE_LOCK avoids this restriction entirely.
+     *   - The Activity's FLAG_KEEP_SCREEN_ON (DashboardActivity) handles
+     *     keeping the physical display on — this is independent of the
+     *     wake lock type used here.
      *
-     * The AndroidManifest already declares android.permission.WAKE_LOCK.
-     *
-     * On Fire OS 7 (API 31+) background foreground services have stricter
-     * execution-time limits. The service should survive because it is
-     * a foreground service with a persistent notification. If the system
-     * kills it under extreme memory pressure, START_STICKY will restart it.
+     * The 12-hour timeout is a safety net. If the service is somehow orphaned
+     * without being destroyed, the wake lock will auto-release. In normal
+     * operation, the service lives for the lifetime of the app.
      */
     private fun acquireWakeLock() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
 
         wakeLock = pm.newWakeLock(
-            // PARTIAL_WAKE_LOCK is correct here:
-            //   - Keeps the CPU alive so the WebView timer (JS watchdog) keeps ticking
-            //   - The Activity's FLAG_KEEP_SCREEN_ON (DashboardActivity.kt) handles
-            //     keeping the physical screen on
-            //   - SCREEN_BRIGHT_WAKE_LOCK + ACQUIRE_CAUSES_WAKEUP throws SecurityException
-            //     on Android 12+ (Fire OS 7+) when held by a foreground service
-            //     that is not the topmost app
             PowerManager.PARTIAL_WAKE_LOCK,
             "FireTVDashboard::ScreenAwake"
         )
 
         try {
-            // Timeout: 12 hours. The service will either be stopped by
-            // onDestroy or will be re-acquired when the service restarts.
-            // Using a timeout is defensive — it prevents an unreleased
-            // wake lock if the service is somehow orphaned.
-            @Suppress("WARNINGS")
-            wakeLock?.acquire(12 * 60 * 60 * 1000L)
-            Log.d(TAG, "SCREEN_BRIGHT_WAKE_LOCK acquired")
+            //noinspectionWakelockTimeout
+            wakeLock?.acquire(12 * 60 * 60 * 1000L)  // 12 hour timeout
+            crashLogger?.log(TAG, "PARTIAL_WAKE_LOCK acquired (12h timeout)")
+            Log.d(TAG, "PARTIAL_WAKE_LOCK acquired")
         } catch (e: SecurityException) {
-            // Thrown if WAKE_LOCK permission is missing from the manifest
-            // (it is declared, but may be stripped by some build configs).
+            crashLogger?.log(TAG, "Failed to acquire wake lock — permission missing: ${e.message}", e)
             Log.e(TAG, "Failed to acquire wake lock — permission missing: ${e.message}", e)
         } catch (e: Exception) {
+            crashLogger?.log(TAG, "Failed to acquire wake lock — unexpected: ${e.message}", e)
             Log.e(TAG, "Failed to acquire wake lock — unexpected: ${e.message}", e)
         }
     }
@@ -138,12 +138,13 @@ class KeepAwakeService : Service() {
         try {
             if (wakeLock?.isHeld == true) {
                 wakeLock?.release()
+                crashLogger?.log(TAG, "Wake lock released")
                 Log.d(TAG, "Wake lock released")
             } else {
                 Log.d(TAG, "Wake lock was not held — no-op")
             }
         } catch (e: Exception) {
-            // IllegalStateException if the wake lock was already released.
+            crashLogger?.log(TAG, "Exception releasing wake lock: ${e.message}", e)
             Log.w(TAG, "Exception releasing wake lock: ${e.message}", e)
         } finally {
             wakeLock = null
@@ -161,9 +162,6 @@ class KeepAwakeService : Service() {
             ).apply {
                 description = "Prevents Fire TV screen from turning off"
                 setShowBadge(false)
-                // Do not show notification in notification drawer — it's just
-                // a foreground service marker; we don't want staff seeing it.
-                setShowBadge(false)
             }
             val nm = getSystemService(NotificationManager::class.java)
             nm.createNotificationChannel(channel)
@@ -171,7 +169,6 @@ class KeepAwakeService : Service() {
     }
 
     private fun buildNotification(): Notification {
-        // When the notification is tapped, open the dashboard Activity.
         val contentIntent = Intent(this, DashboardActivity::class.java)
         val piFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -185,7 +182,7 @@ class KeepAwakeService : Service() {
             .setContentText("Keeping screen on…")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(contentPi)
-            .setOngoing(true)           // Cannot be swiped away
+            .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .build()

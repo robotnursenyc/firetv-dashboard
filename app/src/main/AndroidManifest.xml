@@ -38,7 +38,14 @@
             android:launchMode="singleTask"
             android:screenOrientation="landscape"
             android:theme="@style/Theme.FireTVDashboard"
-            android:windowSoftInputMode="stateAlwaysHidden">
+            android:windowSoftInputMode="stateAlwaysHidden"
+            android:resizeableActivity="false">
+
+            <!-- Declare max aspect ratio for proper fullscreen on wide monitors.
+                 Fire TV is 16:9; 2.4 covers ultra-wide monitors used in some setups. -->
+            <meta-data
+                android:name="android.max_aspect"
+                android:value="2.4" />
 
             <!-- Fires when the app is selected from the Fire TV launcher. -->
             <intent-filter>
