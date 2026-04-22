@@ -14,3 +14,4 @@ layout activity_main
 mipmap ic_launcher
 string app_name
 style Theme.FireTVDashboard
+xml network_security_config

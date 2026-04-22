@@ -202,15 +202,39 @@ jobs:
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
         run: |
+          set -e  # Exit on ANY non-zero step
+
           echo "$VPS_SSH_KEY" > /tmp/vps_key
           chmod 600 /tmp/vps_key
 
           BUILD_NUM=${GITHUB_RUN_NUMBER:-0}
           LOCAL_APK="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
-          echo "=== Deploying firetv-release.apk (build #${BUILD_NUM}) ==="
-          echo "Deploying SHA: ${{ env.APK_SHA }}"
-          echo "Deploying size: ${{ env.APK_SIZE }} bytes"
-          echo "Expected artifact SHA: ${{ env.APK_SHA }}"
+
+          echo "=== PRE-DEPLOY FILE VERIFICATION ==="
+          echo "Expected SHA from env.APK_SHA: ${{ env.APK_SHA }}"
+          echo "Expected SIZE from env.APK_SIZE: ${{ env.APK_SIZE }}"
+          echo "Expected SHA from env.SIGNED_APK_SHA: ${{ env.SIGNED_APK_SHA }}"
+          if [ -f "$LOCAL_APK" ]; then
+            ACTUAL_SHA=$(sha256sum "$LOCAL_APK" | cut -d' ' -f1)
+            ACTUAL_SIZE=$(stat -c %s "$LOCAL_APK")
+            echo "ACTUAL file on disk: SHA=$ACTUAL_SHA SIZE=$ACTUAL_SIZE bytes"
+            echo "File listing:"
+            ls -la "$LOCAL_APK"
+            echo "All APKs in workspace:"
+            find "$GITHUB_WORKSPACE" -name "*.apk" -exec ls -la {} \; 2>/dev/null || echo "none found"
+          else
+            echo "FATAL: LOCAL_APK not found at $LOCAL_APK"
+            find "$GITHUB_WORKSPACE" -name "*.apk" 2>/dev/null || echo "no apks in workspace"
+            exit 1
+          fi
+
+          # STRICT: Fail if file SHA doesn't match what we expected from the signing step
+          if [ "$ACTUAL_SHA" != "${{ env.SIGNED_APK_SHA }}" ]; then
+            echo "FATAL MISMATCH: Local APK SHA ($ACTUAL_SHA) != SIGNED_APK_SHA (${{ env.SIGNED_APK_SHA }})"
+            echo "The APK on disk is NOT the one that was signed. Aborting deploy."
+            exit 1
+          fi
+          echo "SHA verification PASSED. Proceeding with deploy."
 
           # Step 1: scp APK to host /home/hermes/ (hermes home dir is writable via SFTP)
           echo "=== STEP 1: scp APK to VPS ==="
@@ -221,6 +245,17 @@ jobs:
           echo "=== STEP 1 exit code: $S1_EXIT ==="
           if [ $S1_EXIT -ne 0 ]; then
             echo "ERROR: scp failed"
+            exit 1
+          fi
+
+          # Verify file on VPS host matches expected SHA before proceeding
+          echo "=== STEP 1b: Verify file on VPS host ==="
+          VPS_HOST_SHA=$(ssh -o StrictHostKeyChecking=no -i /tmp/vps_key "$VPS_USER@$VPS_HOST" \
+              sha256sum /home/hermes/firetv-release.apk | cut -d' ' -f1)
+          echo "VPS host file SHA: $VPS_HOST_SHA"
+          echo "Expected SHA: $ACTUAL_SHA"
+          if [ "$VPS_HOST_SHA" != "$ACTUAL_SHA" ]; then
+            echo "FATAL: VPS host file SHA mismatch. scp corruption?"
             exit 1
           fi
 

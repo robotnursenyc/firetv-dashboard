@@ -476,6 +476,7 @@ com.hermes.firetv:style/ShapeAppearance.MaterialComponents.Badge = 0x7f10017b
 com.hermes.firetv:style/ShapeAppearance.MaterialComponents = 0x7f10017a
 com.hermes.firetv:style/ShapeAppearance.Material3.Tooltip = 0x7f100179
 com.hermes.firetv:style/ShapeAppearance.Material3.NavigationBarView.ActiveIndicator = 0x7f100177
+com.hermes.firetv:xml/network_security_config = 0x7f120000
 com.hermes.firetv:style/ShapeAppearance.Material3.MediumComponent = 0x7f100176
 com.hermes.firetv:style/ShapeAppearance.Material3.Corner.None = 0x7f100173
 com.hermes.firetv:style/ShapeAppearance.Material3.Corner.Large = 0x7f100171
