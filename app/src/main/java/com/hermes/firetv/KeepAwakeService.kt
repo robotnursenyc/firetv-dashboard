@@ -51,6 +51,11 @@ class KeepAwakeService : Service() {
         // Watchdog interval: restart the wake lock before it times out.
         // The timeout is 12h; we ping at 1h to be safe.
         private const val WAKELOCK_PING_INTERVAL_MS = 60 * 60 * 1000L  // 1 hour
+        // Set on the start intent by BootReceiver to ask this service to bring
+        // DashboardActivity up once it is itself foregrounded — a BroadcastReceiver
+        // cannot reliably start an Activity on Fire OS 7+, but a foreground
+        // service can, during its foregrounding window.
+        const val EXTRA_LAUNCH_ACTIVITY = "launch_activity_on_start"
     }
 
     override fun onCreate() {
@@ -81,6 +86,25 @@ class KeepAwakeService : Service() {
         // START_STICKY: system will restart this service if it is killed.
         // This is critical for a kiosk app — the service must survive.
         crashLogger?.log(TAG, "onStartCommand START_STICKY")
+
+        // If BootReceiver asked us to, launch the Activity now. Starting it
+        // from within the foreground-service start window is permitted on
+        // Fire OS 7+ where a direct Activity start from a BroadcastReceiver
+        // is not.
+        if (intent?.getBooleanExtra(EXTRA_LAUNCH_ACTIVITY, false) == true) {
+            crashLogger?.log(TAG, "onStartCommand — launching DashboardActivity from boot")
+            Log.d(TAG, "onStartCommand — launching DashboardActivity from boot")
+            val launch = Intent(this, DashboardActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            try {
+                startActivity(launch)
+            } catch (e: Exception) {
+                crashLogger?.log(TAG, "Failed to launch DashboardActivity on boot: ${e.message}", e)
+                Log.e(TAG, "Failed to launch DashboardActivity on boot: ${e.message}", e)
+            }
+        }
+
         return START_STICKY
     }
 

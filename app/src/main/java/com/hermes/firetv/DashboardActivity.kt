@@ -87,11 +87,19 @@ class DashboardActivity : AppCompatActivity() {
     // Tracks last page-finish timestamp — used to detect initial load stalls.
     private var lastPageFinishMs: Long = 0L
 
-    // If JS hasn't ponged within this window, consider the page stale and reload.
-    private val STALE_THRESHOLD_MS = 90_000L   // 90 s  (3 × 30-s JS ping interval)
+    // If JS hasn't ponged within this window, count a miss.
+    // Raised from 90 s → 180 s: on flaky Wi-Fi a cold reload plus first paint
+    // can legitimately exceed 90 s, producing false-positive reload loops.
+    private val STALE_THRESHOLD_MS = 180_000L
 
     // Check JS health every this many ms.
     private val WATCHDOG_INTERVAL_MS = 30_000L
+
+    // Require this many consecutive stale observations before declaring the page
+    // unresponsive. A single miss can be a transient GC or IPC pause on the 1 GB
+    // Fire Stick 4K Gen 1; two in a row is the real thing.
+    private val MAX_MISSED_PONGS = 2
+    private var missedPongs = 0
 
     // ── Error-recovery state ─────────────────────────────────────────────────
     private var consecutiveErrors = 0
@@ -167,7 +175,9 @@ class DashboardActivity : AppCompatActivity() {
                 webView.stopLoading()
                 webView.loadUrl("about:blank")
                 webView.clearHistory()
-                webView.clearCache(true)
+                // Deliberately NOT calling clearCache(true) — keeping the disk
+                // cache across restarts lets the dashboard paint immediately on
+                // reboot instead of refetching every asset.
                 webView.destroy()
             } catch (e: Exception) {
                 crashLogger.log(TAG, "Exception during WebView cleanup: ${e.message}", e)
@@ -397,6 +407,7 @@ class DashboardActivity : AppCompatActivity() {
             crashLogger.log(TAG, "Native reload button tapped — forcing reload")
             if (isFinishing) return@setOnClickListener
             consecutiveErrors = 0
+            missedPongs = 0
             isRetryPending = false
             handler.removeCallbacks(retryRunnable)
             webView.reload()
@@ -413,6 +424,13 @@ class DashboardActivity : AppCompatActivity() {
         settings.allowContentAccess = false
         // Reject mixed content (HTTP sub-resources on an HTTPS page).
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+
+        // Bind the JS bridge BEFORE any page load. Without this, the
+        // `AndroidDashboard.pong()` and `AndroidDashboard.requestNativeReload()`
+        // calls from JS are no-ops, the watchdog never gets a pong, and the
+        // retry-via-interceptor path is dead — this was the root cause of the
+        // ~90 s forced-reload loop.
+        webView.addJavascriptInterface(this, "AndroidDashboard")
 
         // Remote debugging — debug builds only.
         if (BuildConfig.ENABLE_WEBVIEW_DEBUG) {
@@ -559,6 +577,7 @@ class DashboardActivity : AppCompatActivity() {
                 lastPageFinishMs = System.currentTimeMillis()
                 lastJsPongMs = lastPageFinishMs
                 consecutiveErrors = 0
+                missedPongs = 0
                 cancelScheduledRetry()
                 isRetryPending = false
                 crashLogger.log(TAG, "Page finished: $url")
@@ -622,7 +641,8 @@ class DashboardActivity : AppCompatActivity() {
             webView.stopLoading()
             webView.loadUrl("about:blank")
             webView.clearHistory()
-            webView.clearCache(true)
+            // Preserve disk cache — the fresh WebView should re-use it so the
+            // dashboard paints fast after a renderer crash.
             webView.destroy()
         } catch (e: Exception) {
             crashLogger.log(TAG, "recreateWebView: cleanup exception: ${e.message}", e)
@@ -646,6 +666,10 @@ class DashboardActivity : AppCompatActivity() {
         settings.allowFileAccess = false
         settings.allowContentAccess = false
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+
+        // Re-bind the JS bridge on the fresh WebView — it's instance-scoped and
+        // must be attached before the page loads or the watchdog fires forever.
+        freshWebView.addJavascriptInterface(this, "AndroidDashboard")
 
         if (BuildConfig.ENABLE_WEBVIEW_DEBUG) {
             WebView.setWebContentsDebuggingEnabled(true)
@@ -803,11 +827,20 @@ class DashboardActivity : AppCompatActivity() {
             if (authToken.isNotEmpty()) {
                 conn.setRequestProperty("X-App-Auth", authToken)
             }
-            conn.setRequestProperty("User-Agent", "FireTV/1.0")
+            // Preserve WebView's own User-Agent — overriding to "FireTV/1.0" broke
+            // Next.js client-detection heuristics in the dashboard bundle.
 
-            // Forward applicable headers from the WebView's original request.
+            // HttpURLConnection transparently ungzips responses, but the original
+            // Content-Encoding: gzip header is still forwarded; WebView then tries
+            // to ungzip already-plain bytes and produces a blank page. Force the
+            // origin to skip compression on this hop to sidestep the mismatch.
+            conn.setRequestProperty("Accept-Encoding", "identity")
+
+            // Forward applicable headers from the WebView's original request,
+            // skipping hop-by-hop headers and the Accept-Encoding we just set.
             request.requestHeaders?.forEach { (key, value) ->
-                if (key.isNotEmpty() && key.lowercase() !in HOP_BY_HOP) {
+                val k = key.lowercase()
+                if (key.isNotEmpty() && k !in HOP_BY_HOP && k != "accept-encoding") {
                     conn.setRequestProperty(key, value)
                 }
             }
@@ -921,9 +954,15 @@ class DashboardActivity : AppCompatActivity() {
                 mime == "application/json"
 
     companion object {
+        // Hop-by-hop + length/encoding headers stripped during proxying.
+        // content-encoding and content-length must not survive the hop because
+        // HttpURLConnection has already decompressed the body; forwarding the
+        // original length/encoding describes bytes WebView never receives and
+        // causes blank pages or JS parser crashes.
         private val HOP_BY_HOP = setOf(
             "transfer-encoding", "connection", "keep-alive", "upgrade",
-            "proxy-authenticate", "proxy-authorization", "te", "trailers", "host"
+            "proxy-authenticate", "proxy-authorization", "te", "trailers", "host",
+            "content-encoding", "content-length"
         )
     }
 
@@ -1001,10 +1040,18 @@ class DashboardActivity : AppCompatActivity() {
 
         val elapsed = System.currentTimeMillis() - lastJsPongMs
         if (elapsed > STALE_THRESHOLD_MS) {
-            crashLogger.log(TAG, "JS watchdog TRIGGERED — no pong for ${elapsed / 1000}s (threshold=${STALE_THRESHOLD_MS / 1000}s)")
-            Log.w(TAG, "JS watchdog TRIGGERED — no pong for ${elapsed / 1000}s (threshold=${STALE_THRESHOLD_MS / 1000}s)")
-            consecutiveErrors++
-            onMainFrameError(-1, "JS watchdog: page unresponsive for ${elapsed / 1000}s")
+            missedPongs++
+            crashLogger.log(TAG, "JS watchdog: no pong for ${elapsed / 1000}s (missed=$missedPongs/$MAX_MISSED_PONGS)")
+            Log.w(TAG, "JS watchdog: no pong for ${elapsed / 1000}s " +
+                "(threshold=${STALE_THRESHOLD_MS / 1000}s, missed=$missedPongs/$MAX_MISSED_PONGS)")
+            if (missedPongs >= MAX_MISSED_PONGS) {
+                crashLogger.log(TAG, "JS watchdog TRIGGERED after $missedPongs consecutive misses")
+                Log.w(TAG, "JS watchdog TRIGGERED — declaring page unresponsive")
+                missedPongs = 0
+                onMainFrameError(-1, "JS watchdog: page unresponsive for ${elapsed / 1000}s")
+            }
+        } else {
+            missedPongs = 0
         }
 
         if (!isRetryPending) {
@@ -1258,6 +1305,14 @@ class DashboardActivity : AppCompatActivity() {
             .setPositiveButton("Exit") { _, _ ->
                 crashLogger.log(TAG, "User confirmed exit")
                 Log.d(TAG, "User confirmed exit")
+                // Stop the keep-awake service before finishing so its wake lock
+                // is released. Otherwise the service lingers and holds the lock
+                // until the system reaps it.
+                try {
+                    stopService(Intent(this, KeepAwakeService::class.java))
+                } catch (t: Throwable) {
+                    crashLogger.log(TAG, "Failed to stop KeepAwakeService on exit: ${t.message}", t)
+                }
                 finish()
             }
             .setNegativeButton("Cancel", null)
