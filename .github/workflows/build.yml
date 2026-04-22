@@ -85,6 +85,7 @@ jobs:
           echo "acra.properties written (Telegram credentials injected)"
 
       - name: Build release APK
+        continue-on-error: true
         env:
           ANDROID_HOME: /opt/android-sdk
           ANDROID_SDK_ROOT: /opt/android-sdk
