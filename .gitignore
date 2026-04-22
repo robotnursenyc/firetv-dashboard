@@ -1,0 +1,45 @@
+# Built application outputs
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Java / Kotlin
+*.class
+*.jar
+*.log
+
+# Gradle
+.gradle/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Local config (contains secrets — never commit)
+local.properties
+gradle.properties       # Should have dashboardAuthToken= only, but CI overrides
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+.cxx/
+*.swp
+*.swo
+
+# Build outputs
+app/build/
+build/
+!app/src/main/AndroidManifest.xml   # Source manifests are tracked
+
+# Generated files
+app/src/main/java/com/hermes/firetv/BuildConfig.java
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# CI artifacts
+*.keystore
+*.jks
+
+# SSH keys
+*.pem
+id_rsa*

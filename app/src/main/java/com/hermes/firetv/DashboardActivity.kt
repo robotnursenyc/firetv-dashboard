@@ -335,9 +335,14 @@ class DashboardActivity : AppCompatActivity() {
                 val url = request?.url ?: return null
                 val host = url.host ?: return null
 
-                // Only intercept dashboard server traffic.
-                // All other requests (CDN, external APIs) pass through unaltered.
+                // Only intercept GET requests to the dashboard server.
+                // POST/PUT/DELETE cannot be faithfully proxied because
+                // WebResourceRequest does not expose the request body.
+                // Let the WebView handle those natively — they go direct
+                // over HTTPS without the X-App-Auth header (the dashboard
+                // session is already established via the initial HTML).
                 if (host != "dashboard.cashlabnyc.com") return null
+                if (request.method != "GET") return null
 
                 val path = url.path ?: "/"
                 Log.v(TAG, "INTERCEPT ${request.method} $path")

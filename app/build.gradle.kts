@@ -84,7 +84,4 @@ dependencies {
     implementation("ch.acra:acra-core:$acraVersion")
     implementation("ch.acra:acra-mail:$acraVersion")
     implementation("ch.acra:acra-http:$acraVersion")
-
-    // Lifecycle process — enables ProcessLifecycleOwner for ACRA init.
-    implementation("androidx.lifecycle:lifecycle-process:2.7.0")
 }
