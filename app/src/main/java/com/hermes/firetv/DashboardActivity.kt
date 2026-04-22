@@ -234,7 +234,9 @@ class DashboardActivity : AppCompatActivity() {
                     Log.d(TAG, "  Buffered ${bytes.size} bytes for ${path}")
 
                     val bufferedInputStream = ByteArrayInputStream(bytes)
-                    WebResourceResponse(mimeType, "UTF-8", statusCode, reasonPhrase, responseHeaders, bufferedInputStream)
+                    // Only set charset for actual text-based content types
+                    val charset = if (mimeType.startsWith("text/") || mimeType == "application/json") "UTF-8" else null
+                    WebResourceResponse(mimeType, charset, statusCode, reasonPhrase, responseHeaders, bufferedInputStream)
                 } catch (e: Exception) {
                     Log.e(TAG, "INTERCEPT EXCEPTION for ${path}: ${e.javaClass.simpleName}: ${e.message}")
                     e.printStackTrace()
