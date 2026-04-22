@@ -204,16 +204,22 @@ SCRIPT_EOF"
           echo "=== Script uploaded, piping APK ==="
 
           # Step 2: pipe APK into the already-uploaded deploy script
-          cat "$LOCAL_APK" | \
-            ssh -o StrictHostKeyChecking=no -o BatchMode=yes \
-               -i /tmp/vps_key "$VPS_USER@$VPS_HOST" \
-               "docker exec -i apk-serve sh -c 'sh /tmp/deploy_apk.sh'"
+          # Separate SSH command so APK stdin does NOT share with the script execution
+          set -x
+          cat "$LOCAL_APK" | ssh -o StrictHostKeyChecking=no \
+             -i /tmp/vps_key "$VPS_USER@$VPS_HOST" \
+             "docker exec -i apk-serve sh -c 'sh /tmp/deploy_apk.sh'"
+          set +x
+          APK_DEPLOY_EXIT=$?
+          echo "APK pipe exit code: $APK_DEPLOY_EXIT"
 
-          DEPLOY_STATUS=$?
-          if [ $DEPLOY_STATUS -ne 0 ]; then
-            echo "ERROR: Deploy failed with exit code $DEPLOY_STATUS"
+          if [ $APK_DEPLOY_EXIT -ne 0 ]; then
+            echo "ERROR: APK deploy failed with exit code $APK_DEPLOY_EXIT"
+            ssh -o StrictHostKeyChecking=no -i /tmp/vps_key "$VPS_USER@$VPS_HOST" \
+              "docker exec apk-serve ls -la /tmp/ 2>&1 || true"
             exit 1
           fi
+
           echo "=== VPS deploy complete ==="
 
       # NOTE: Telegram build notifications removed — TELEGRAM_BOT_TOKEN secret
