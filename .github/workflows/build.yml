@@ -56,6 +56,15 @@ jobs:
             unzip -q gradle.zip
           fi
 
+      # ── Inject auth token into gradle.properties before build ──────────────
+      - name: Inject auth token for release builds
+        run: |
+          # Append to gradle.properties (local.properties takes precedence;
+          # buildConfigField reads from project.ext in build.gradle.kts)
+          # The token is only used in release builds via buildConfigField.
+          echo "dashboardAuthToken=${{ secrets.DASHBOARD_AUTH_TOKEN }}" >> $GITHUB_WORKSPACE/gradle.properties
+          echo "Auth token written to gradle.properties (masked in logs)"
+
       - name: Build release APK
         run: |
           export ANDROID_HOME=/opt/android-sdk
@@ -65,28 +74,70 @@ jobs:
           gradle assembleRelease --no-daemon 2>&1 | tail -30
           find . -name "*.apk" 2>/dev/null
 
-      - name: Fix APK signatures (strip v1, keep v2 only, re-sign with debug key)
-        env:
-          DEBUG_KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_B64 }}
+      - name: Verify release APK was produced
         run: |
-          export ANDROID_HOME=/usr/local/lib/android/sdk
-          mkdir -p ~/.android
-          echo "$DEBUG_KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
+          APK="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$APK" ]; then
+            echo "ERROR: app-release.apk not found!"
+            exit 1
+          fi
+          echo "APK size: $(du -h "$APK" | cut -f1)"
+
+      # ── Sign v2-only, strip v1 ─────────────────────────────────────────────
+      # Uses a dedicated UPLOAD_KEYSTORE (not the debug keystore) to avoid
+      # the "dual-signing with debug key" issue on older FireTV hardware.
+      # The keystore + password come from GitHub Secrets.
+      - name: Strip v1 signature and re-sign v2-only
+        env:
+          UPLOAD_KEYSTORE_B64: ${{ secrets.UPLOAD_KEYSTORE_B64 }}
+          UPLOAD_KEYSTORE_ALIAS: ${{ secrets.UPLOAD_KEYSTORE_ALIAS }}
+          UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}
+          UPLOAD_KEY_PASSWORD: ${{ secrets.UPLOAD_KEY_PASSWORD }}
+        run: |
+          set -e  # Fail fast on any error
+          export ANDROID_HOME=/opt/android-sdk
+          export ANDROID_SDK_ROOT=/opt/android-sdk
+
           APK_IN="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
-          # Use apksigner to strip v1 and re-sign v2-only with debug keystore
-          # This removes all existing signatures and applies fresh v2-only sig
+          APK_FIXED="/tmp/firetv-signed.apk"
+
+          echo "=== Verifying input APK ==="
+          $ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 "$APK_IN"
+
+          echo "=== Decoding upload keystore ==="
+          mkdir -p ~/.android
+          echo "$UPLOAD_KEYSTORE_B64" | base64 -d > ~/.android/upload.keystore
+
+          echo "=== Re-signing (v1=OFF, v2=ON, v3=OFF) ==="
           $ANDROID_HOME/build-tools/34.0.0/apksigner sign \
             --v1-signing-enabled false \
             --v2-signing-enabled true \
-            --ks ~/.android/debug.keystore \
-            --ks-key-alias androiddebugkey \
-            --ks-pass pass:android \
-            --key-pass pass:android \
-            --out /tmp/fixed.apk \
+            --v3-signing-enabled false \
+            --ks ~/.android/upload.keystore \
+            --ks-key-alias "$UPLOAD_KEYSTORE_ALIAS" \
+            --ks-pass "pass:$UPLOAD_KEYSTORE_PASSWORD" \
+            --key-pass "pass:$UPLOAD_KEY_PASSWORD" \
+            --out "$APK_FIXED" \
             "$APK_IN"
-          # Verify v2-only
-          $ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 /tmp/fixed.apk
-          mv /tmp/fixed.apk "$APK_IN"
+
+          echo "=== Verifying output signature ==="
+          $ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 "$APK_FIXED"
+
+          # Sanity-check: v1 must be false, v2 must be true
+          VERIFY_OUT=$($ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 "$APK_FIXED" 2>&1)
+          if echo "$VERIFY_OUT" | grep -q "Verified using v1 scheme (JAR signing)"; then
+            echo "ERROR: v1 signature still present after strip!"
+            exit 1
+          fi
+          if echo "$VERIFY_OUT" | grep -q "Verified using v2 scheme"; then
+            echo "v2 signature verified ✓"
+          else
+            echo "ERROR: v2 signature not found!"
+            exit 1
+          fi
+
+          echo "=== Copying signed APK back ==="
+          cp "$APK_FIXED" "$APK_IN"
 
       - name: Upload APK as artifact
         if: always()
@@ -102,18 +153,32 @@ jobs:
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
         run: |
+          set -e
           echo "$VPS_SSH_KEY" > /tmp/vps_key
           chmod 600 /tmp/vps_key
+
+          # Extract version from build output
+          VERSION_NAME=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts 2>/dev/null || echo "unknown")
+          BUILD_NUM=${GITHUB_RUN_NUMBER:-0}
+
           scp -o StrictHostKeyChecking=no -i /tmp/vps_key \
             "$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk" \
             $VPS_USER@$VPS_HOST:/tmp/firetv-release.apk
+
           ssh -o StrictHostKeyChecking=no -i /tmp/vps_key $VPS_USER@$VPS_HOST \
             "docker cp /tmp/firetv-release.apk apk-serve:/usr/share/nginx/html/apk/firetv-release.apk && \
-             docker exec apk-serve sh -c 'echo \"{\\\"version\\\":\\\"1.8.1\\\",\\\"build\\\":10,\\\"apk_url\\\":\\\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\\\"}\" > /usr/share/nginx/html/apk/version.json'"
+             docker exec apk-serve sh -c 'echo \"{\\\"version\\\":\\\"${VERSION_NAME}\\\",\\\"build\\\":${BUILD_NUM},\\\"apk_url\\\":\\\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\\\"}\" > /usr/share/nginx/html/apk/version.json'"
 
       - name: Notify Telegram
         if: success()
         run: |
           curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d "text=✅ FireTV APK deployed to VPS. URL: https://dashboard.cashlabnyc.com/apk/firetv-release.apk"
+            -d "text=✅ FireTV APK deployed to VPS. Build #${{ github.run_number }}. URL: https://dashboard.cashlabnyc.com/apk/firetv-release.apk"
+
+      - name: Notify Telegram on failure
+        if: failure()
+        run: |
+          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=❌ FireTV APK build FAILED. Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"

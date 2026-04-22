@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Block all cleartext (HTTP) in production.
+         dashboard.cashlabnyc.com is HTTPS, so this has no runtime effect.
+         This config also prevents the app from accidentally loading HTTP
+         sub-resources in the future. -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- Explicitly trust the dashboard domain.
+         com.amazon.tv.trustzone stores root CAs on Fire OS.
+         Let's Encrypt IS4 is in the system trust store on Fire OS 6+.
+         If a corporate proxy cert is needed, add it here via
+         <certificates src="user" /> or a raw resource. -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">dashboard.cashlabnyc.com</domain>
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </domain-config>
+</network-security-config>

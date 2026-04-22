@@ -1,6 +1,16 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+// Read auth token from gradle.properties (injected by CI script).
+// Fallback to empty string for local debug builds.
+val dashboardAuthToken: String = run {
+    val props = Properties()
+    project.rootProject.file("gradle.properties").inputStream().use { props.load(it) }
+    props.getProperty("dashboardAuthToken", "")
 }
 
 android {
@@ -18,17 +28,25 @@ android {
             abiFilters += listOf("armeabi-v7a", "arm64-v8a")
         }
 
+        // Auth token injected by CI from secrets.DASHBOARD_AUTH_TOKEN.
+        // Source tree always has an empty string here.
         buildConfigField("String", "DASHBOARD_URL", "\"https://dashboard.cashlabnyc.com\"")
+        buildConfigField("String", "AUTH_TOKEN", "\"$dashboardAuthToken\"")
     }
 
     buildTypes {
         debug {
             isMinifyEnabled = false
             isDebuggable = true
+            buildConfigField("Boolean", "ENABLE_WEBVIEW_DEBUG", "true")
         }
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            isDebuggable = false
+            buildConfigField("Boolean", "ENABLE_WEBVIEW_DEBUG", "false")
+            // CI pipeline (build.yml) re-signs this APK with UPLOAD_KEYSTORE_B64
+            // after the assemble step. Local `gradle assembleRelease` uses
+            // signingConfigs.release (debug keystore, for dev only).
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -55,5 +73,18 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
-    implementation("androidx.webkit:webkit:1.8.0")
+
+    // Webkit 1.10.0: security fix, Fire OS 7 compatibility, better long-session stability
+    implementation("androidx.webkit:webkit:1.10.0")
+
+    // ACRA 5.11.3 — crash reporting via HTTP POST to crash relay.
+    // ACRA is only active in release builds (isDebuggable=false in buildType).
+    // Annotations on FireTVApplication drive configuration.
+    val acraVersion = "5.11.3"
+    implementation("ch.acra:acra-core:$acraVersion")
+    implementation("ch.acra:acra-mail:$acraVersion")
+    implementation("ch.acra:acra-http:$acraVersion")
+
+    // Lifecycle process — enables ProcessLifecycleOwner for ACRA init.
+    implementation("androidx.lifecycle:lifecycle-process:2.7.0")
 }
