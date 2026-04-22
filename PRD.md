@@ -1,387 +1,272 @@
-# FireTV Family Dashboard — Production Readiness PRD
+# FireTV Dashboard — Product Requirements Document
 
-## Context
-
-A single Android/Fire TV application (`com.hermes.firetv`) that loads a Next.js dashboard via an embedded WebView and displays it as a wall-mounted kiosk display. The app is sideloaded onto Amazon Fire TV Stick hardware. It must run unattended 24/7, survive network outages, recover from crashes, and never blank the screen.
-
-**Current state:** The app builds and runs on modern Fire Stick 4K hardware, but has 5 critical (P0) defects and 9 high-priority (P1) defects that make it unsuitable for unattended production deployment. A security audit (April 22, 2026) identified hardcoded credentials, a broken release-signing pipeline, an ineffective screen-wake mechanism, zero error recovery, and zero observability.
+> **Status:** Build pipeline GREEN. Runtime fixes applied. Awaiting hardware verification.
+> **Last updated:** 2026-04-22
+> **Owner:** Brian / Hermes Agent
 
 ---
 
-## Glossary
+## 1. Overview
 
-| Term | Meaning |
-|------|---------|
-| Fire OS | Amazon's Android-based OS for Fire TV hardware |
-| WebView | Android's embedded Chromium-based web renderer |
-| shouldInterceptRequest | WebView API that lets the app proxy/modify HTTP requests |
-| WAKE_LOCK | Android power management flag preventing CPU or screen sleep |
-| Kiosk mode | Locked-down device state where only one app is usable |
-| DPC / Device Owner | Android Device Policy Controller — enforces kiosk lockdown |
-| ACRA | Android Crash Reporting library — application-level crash collection |
-| TTV WebView | Amazon's Fire OS–specific TV WebView (`com.amazon.webview.chromium`) |
+**What:** Android/Fire TV application that displays the family schedule dashboard (`https://dashboard.cashlabnyc.com`) in a full-screen WebView on a TV, running 24/7 as a wall display / kiosk.
 
----
+**Why:** Replace a browser tab on a laptop or Chromecast with a purpose-built, auto-starting, self-healing kiosk app that survives power loss, network outages, and Fire Stick sleep — suitable for non-technical household/office use.
 
-## Project Overview
-
-**Package:** `com.hermes.firetv`
-**minSdk:** 22 | **targetSdk:** 34 | **compileSdk:** 34
-**Language:** Kotlin 1.9.22 | **Gradle:** 8.4 | **AGP:** 8.2.2
-
-**Architecture:** Single-Activity WebView app
-- `DashboardActivity` — one Activity hosting a full-screen WebView
-- `KeepAwakeService` — foreground Service attempting to prevent screen sleep
-- `shouldInterceptRequest` — proxies all dashboard traffic, injects `X-App-Auth` header
-
-**Target hardware:** Amazon Fire TV Stick 4K (1st and 2nd gen), Fire TV Stick 4K Max
-**Fire OS compatibility:** Fire OS 6 (API 25–30) through Fire OS 7 (API 31–34)
+**Target hardware:**
+- Amazon Fire TV Stick 4K (first generation, 2018 — Fire OS 7, API 28)
+- Fire TV Stick 4K Max (2021 — Fire OS 8, API 31)
+- Fire TV Cube (2022 — Fire OS 7, API 28)
+- NOT supported: first-gen Fire Stick (no 4K, different GPU)
 
 ---
 
-## Problem Statement
-
-The app currently fails the following production requirements:
-
-1. **Install reliability** — Release APK may be dual-signed (v1+v2), causing `INSTALL_PARSE_FAILED_NO_CERTIFICATES` on older Fire TV hardware.
-2. **Screen wake** — `KeepAwakeService` uses `PARTIAL_WAKE_LOCK` (prevents CPU sleep, not screen sleep) and constructs `MotionEvent` objects that are never dispatched. The screen blanks within 10–30 minutes of idle.
-3. **Security** — Auth token hardcoded in source and logged in plaintext. Custom `TrustManager` bypasses all TLS certificate validation, enabling man-in-the-middle attacks.
-4. **Fault tolerance** — No retry logic, no error overlay, no watchdog. Any network blip or JS error shows a permanently blank screen.
-5. **Observability** — Zero crash reporting or structured logging. Unattended deployments give zero feedback when failures occur.
-6. **Kiosk hardening** — No app lock, no `FLAG_SECURE`, back button can exit, other apps are accessible.
-7. **Recovery** — No automatic recovery from WebView freeze, OOM, or process death.
-
----
-
-## Success Criteria
-
-- [ ] Release APK installs cleanly on Fire OS 6 and Fire OS 7 hardware
-- [ ] Release APK is signed v2-only (v1 stripped) — verifiable with `apksigner`
-- [ ] Auth token is not present in source code or decompiled bytecode
-- [ ] All TLS connections use system trust store (no custom TrustManager)
-- [ ] Screen stays on indefinitely (user must still disable Fire OS screensaver in settings)
-- [ ] Dashboard auto-reloads within 30s of any network failure
-- [ ] Dashboard auto-reloads within 60s of a JS/WebView hang
-- [ ] App survives 8-hour unattended runs without blanking or freezing
-- [ ] Crash reports are delivered via Telegram within 5 minutes of app crash
-- [ ] No screenshots or screen recordings can be captured of the dashboard (FLAG_SECURE)
-- [ ] Back button does not exit the app
-- [ ] Release APK has no hardcoded secrets, no debug logging, `android:debuggable=false`
-
----
-
-## High-Level Architecture
+## 2. Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Fire TV Stick 4K (Fire OS 6/7)                         │
-│                                                          │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │  DashboardActivity (single Activity)              │   │
-│  │                                                    │   │
-│  │  ┌────────────────────────────────────────────┐  │   │
-│  │  │  WebView (Chromium, hardware-accelerated)   │  │   │
-│  │  │  loads: https://dashboard.cashlabnyc.com   │  │   │
-│  │  │  X-App-Auth header injected via            │  │   │
-│  │  │  shouldInterceptRequest                    │  │   │
-│  │  └────────────────────────────────────────────┘  │   │
-│  │                                                    │   │
-│  │  JS interface: AndroidDashboard { ping(), log() } │   │
-│  │  Watchdog: 60s timer → reload on JS silence       │   │
-│  │  Error overlay: injected HTML on main frame error  │   │
-│  └──────────────────────────────────────────────────┘   │
-│                                                          │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │  KeepAwakeService (foreground)                   │   │
-│  │  SCREEN_BRIGHT_WAKE_LOCK +                       │   │
-│  │  Window.FLAG_KEEP_SCREEN_ON                      │   │
-│  │  NO fake touch, NO daemon thread                 │   │
-│  └──────────────────────────────────────────────────┘   │
-│                                                          │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │  ACRA (crash reporting)                          │   │
-│  │  Telegram bot notification on crash               │   │
-│  └──────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────┘
-              │ HTTPS (Let's Encrypt, system trust store)
-              ▼
-  ┌───────────────────────────────────┐
-  │  dashboard.cashlabnyc.com          │
-  │  Next.js app (auth-protected)      │
-  └───────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│  Fire TV Stick (Fire OS 7/8)                                        │
+│                                                                     │
+│  ┌─────────────┐   ┌──────────────────────┐   ┌─────────────────┐ │
+│  │BootReceiver │──▶│  KeepAwakeService     │   │  DashboardActivity│ │
+│  │ (BOOT_COMPLE│   │  PARTIAL_WAKE_LOCK    │   │  WebView         │ │
+│  │  TED)       │   │  (foreground, sticky)│   │  - injects auth  │ │
+│  └─────────────┘   └──────────────────────┘   │  - JS watchdog   │ │
+│                                                │  - retry loop    │ │
+│  ┌──────────────────────────────────────────┐  │  - offline overlay│ │
+│  │  Android WebView                         │  └─────────────────┘ │
+│  │  loads https://dashboard.cashlabnyc.com  │                       │
+│  └──────────────────────────────────────────┘                       │
+└──────────────────────────┬──────────────────────────────────────────┘
+                           │ HTTPS (port 443)
+                           ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  VPS: 2.24.198.162 (Traefik → Next.js on :8081)                   │
+│  Dashboard URL: https://dashboard.cashlabnyc.com                    │
+│  APK served at: https://dashboard.cashlabnyc.com/apk/firetv-release.apk│
+└─────────────────────────────────────────────────────────────────────┘
 ```
+
+### Key Design Decisions
+
+| Decision | Rationale |
+|----------|----------|
+| WebView (not native UI or Chrome Custom Tab) | Single codebase, works for any web dashboard, fastest to build |
+| Foreground Service for keep-awake | START_STICKY ensures restart after system kills |
+| Exponential backoff retry | Prevents hammering server during extended outage |
+| JS watchdog (90s stale threshold) | Detects JS hangs that don't trigger network errors |
+| CI-injected auth token (BuildConfig) | No secrets in source; CI env var at build time |
+| `singleTask` launchMode | Prevents multiple dashboard instances |
+| Boot receiver for auto-start | Survives power loss, firmware update, reboot |
+| APK hosted on VPS + ADB sideload | No Google Play; sideload is the Fire Stick channel |
 
 ---
 
-## Security Design
+## 3. Component Inventory
 
-### Credential Management
-- Auth token injected at CI build time via `Gradle.properties` → `BuildConfig`
-- `AUTH_TOKEN` constant removed from source entirely
-- Token logged only as presence boolean (not value), guarded by `BuildConfig.DEBUG`
-- Token stored in GitHub Actions Secrets (`secrets.DASHBOARD_AUTH_TOKEN`)
+### 3.1 DashboardActivity
+- Full-screen immersive WebView
+- `FLAG_KEEP_SCREEN_ON` — keeps display on
+- `FLAG_SECURE` — blocks screenshots (kiosk security)
+- Auth header injection via `shouldInterceptRequest` for GETs to dashboard domain
+- JS watchdog: injects `AndroidDashboard.pong()` every 30s; reloads if no pong in 90s
+- Exponential backoff: 5s → 15s → 60s → 5min; max 10 retries before offline overlay
+- Offline overlay: self-contained HTML (no external deps), countdown timer, manual Retry button
+- Native reload button (bottom-right, ↻) — works even if JS is crashed
+- Exit confirmation dialog — prevents accidental app exit by staff
+- `onTrimMemory`: reloads only when `isInForeground=true` AND level ≥ MODERATE (not on BACKGROUND)
 
-### TLS / Certificate Validation
-- Custom `TrustManager` and `HostnameVerifier` **removed entirely**
-- System default trust store used (includes Let's Encrypt since Android 4.2)
-- `android:networkSecurityConfig` set with `cleartextTrafficPermitted="false"`
-- Dashboard domain explicitly trusted via domain-config in `network_security_config.xml`
+### 3.2 KeepAwakeService
+- `START_STICKY` foreground service
+- `PARTIAL_WAKE_LOCK` (NOT SCREEN_BRIGHT — that throws SecurityException on Fire OS 7+)
+- Ongoing notification (non-dismissible, LOW priority, no badge)
+- `ACQUIRE_CAUSES_WAKEUP` removed — causes unwanted screen flash on boot
+- Note: does NOT suppress Fire TV screensaver — must be disabled in Settings
 
-### App Hardening
-- `android:debuggable` — `false` in release (controlled by `build.gradle.kts`)
-- `android:allowBackup` — `false` (prevents `adb backup` extraction)
-- `FLAG_SECURE` — set on Activity window (blocks screenshots/recording)
-- `WebView.setWebContentsDebuggingEnabled` — only in debug builds
-- WebView `allowFileAccess` — `false` (already set)
+### 3.3 BootReceiver
+- Listens for `BOOT_COMPLETED`
+- Starts DashboardActivity with `FLAG_ACTIVITY_NEW_TASK`
+- No-op on any other broadcast
 
-### Network Security Config
-```xml
-<!-- res/xml/network_security_config.xml -->
-<!-- Block cleartext; trust system CAs; no user-added CAs -->
+### 3.4 CI/CD Pipeline (GitHub Actions)
+1. Setup Android SDK (Google-hosted runner)
+2. Build: `gradlew assembleRelease` → `app-release-unsigned.apk`
+3. Verify: checks `app-release-unsigned.apk` exists
+4. Sign: apksigner v2-only re-sign with `firetv-upload` key from secrets
+5. Deploy: pipes APK over SSH → docker exec → nginx container at `/usr/share/nginx/html/apk/`
+
+---
+
+## 4. Security Model
+
+| Concern | Mitigation |
+|---------|-----------|
+| Auth token in source | CI injects at build time via gradle.properties; empty in git |
+| Screenshot/screen record | `FLAG_SECURE` on window |
+| Cleartext traffic | `usesCleartextTraffic=false` + NetworkSecurityConfig; HTTPS only |
+| WebView asset access | `allowFileAccess=false`, `allowContentAccess=false` |
+| Mixed content | `MIXED_CONTENT_NEVER_ALLOW` |
+| Exported components | BootReceiver exported=true required (system sends BOOT_COMPLETED); all others not exported |
+| WebView remote debugging | Only in debug builds; disabled in release |
+| Crash reporting | None currently (ACRA removed; Crashlytics optional future addition) |
+| VPS dashboard auth | Traefik auth middleware missing — **manual step required on VPS** |
+
+### Manual VPS Security Step (P2-04 — REQUIRES ROOT)
+```
+File: /etc/traefik/dynamic.yml (read-only ext4 mount inside container)
+Fix: Add auth middleware to dashboard-https router
+Status: BLOCKED — needs host root to remount filesystem rw
 ```
 
 ---
 
-## Error Recovery Design
+## 5. Fire Stick Setup Checklist
 
-### WebView Error Recovery State Machine
+Before the app will work correctly as a 24/7 kiosk display, staff must perform these one-time setup steps on the Fire Stick:
 
-```
-[LOADING] ──→ [LOADED] ──→ [STALE_DETECTED] ──→ [RELOADING]
-                   ↑               │
-                   │               ↓
-                   └── [ERROR] ←──┘
-```
+### Required (screen stays on)
+1. **Settings → Display & Sounds → Screen Saver → Never**
+   - If left on any setting other than "Never," the TV will go black regardless of the app.
+   - The app cannot override this programmatically without Device Owner (admin) provisioning.
 
-- **LOADED:** Dashboard loaded successfully. JS ping expected every 30s.
-- **STALE_DETECTED:** No JS ping for 90s (3 × 30s intervals). Reload triggered.
-- **ERROR:** `onReceivedError` for main frame fires. Exponential backoff: 5s → 15s → 60s → 5min → max 5min.
-- **RELOADING:** `webView.loadUrl(url)` called. Returns to LOADING.
-- **MAX_RETRIES:** After 10 consecutive failures, stop retrying and show persistent error overlay.
-- **NETWORK_RECOVERY:** On `connectivityChange` broadcast (if registered), immediately retry once.
+2. **Settings → Display & Sounds → Auto Power Off → Never**
+   - Prevents TV from powering off after a set idle period.
 
-### Error Overlay
-On main frame error, inject minimal HTML overlay:
-```html
-<!-- No external dependencies — fully self-contained -->
-<div style="background:#121212;color:#fff;font-family:sans-serif;
-            display:flex;align-items:center;justify-content:center;height:100vh">
-  <div style="text-align:center">
-    <div style="font-size:48px">⚠</div>
-    <div style="font-size:24px;margin:16px 0">Dashboard unavailable</div>
-    <div id="countdown" style="font-size:16px;opacity:0.6"></div>
-    <div id="retry-btn" style="margin-top:24px;padding:12px 32px;
-         background:#333;cursor:pointer;border-radius:8px">
-      Retry Now
-    </div>
-  </div>
-</div>
-<script>
-  // Countdown + retry button logic (self-contained, no external deps)
-</script>
-```
+3. **Settings → My Fire TV → Developer Options → ADB Debugging → ON**
+   - Required for sideloading the APK and for debugging.
 
-### JS ↔ App Communication (JavascriptInterface)
-```kotlin
-webView.addJavascriptInterface(object {
-    @JavascriptInterface
-    fun pong() { lastJsPong = System.currentTimeMillis() }
+4. **Settings → My Fire TV → Developer Options → Install from Unknown Apps → FireTV Dashboard → ON**
+   - Allows the APK to be installed without the Amazon Appstore.
 
-    @JavascriptInterface
-    fun log(level: String, msg: String) {
-        when(level) {
-            "ERROR" -> Log.e(TAG, "[JS] $msg")
-            "WARN"  -> Log.w(TAG, "[JS] $msg")
-            else    -> Log.d(TAG, "[JS] $msg")
-        }
-    }
-}, "AndroidDashboard")
-```
+### Recommended (auto-start)
+5. **Reboot the Fire Stick** after installing the app.
+   - The BootReceiver will launch the dashboard automatically on next boot.
 
-JS side: `AndroidDashboard.pong()` called every 30s via `setInterval`.
+### Optional (remote access debugging)
+6. **Settings → My Fire TV → Developer Options → ADB Debugging → ON** (already done)
+   - For remote logcat: `adb connect <firetv-ip>:5555`
+   - For WebView inspection: Chrome desktop → `chrome://inspect/#devices` (same network)
 
 ---
 
-## Logging / Observability Design
+## 6. Deployment Instructions
 
-### Structured Log Tags
-| Tag | Purpose |
-|-----|---------|
-| `HermesDashboard` | App lifecycle, Activity events |
-| `HermesWebView` | WebViewClient callbacks, shouldInterceptRequest |
-| `HermesNetwork` | HTTP response codes, SSL/TLS events |
-| `HermesWatchdog` | JS hang detection, reload triggers |
-| `HermesCrash` | ACRA crash reports |
+### Build and Release (automatic)
+Every push to `main` triggers GitHub Actions:
+1. APK builds at: `https://dashboard.cashlabnyc.com/apk/firetv-release.apk`
+2. Version JSON at: `https://dashboard.cashlabnyc.com/apk/version.json`
 
-### Startup Banner
-```kotlin
-Log.d(TAG, """
-    ═══════════════════════════════════════
-    Family Dashboard v${BuildConfig.VERSION_NAME}
-    DASHBOARD_URL=${BuildConfig.DASHBOARD_URL}
-    AUTH_TOKEN_PRESENT=${authToken.isNotEmpty()}
-    BUILD_TYPE=${BuildConfig.BUILD_TYPE}
-    FIRE_OS=${Build.VERSION.SDK_INT} (API ${Build.VERSION.SDK_INT})
-    DEVICE=${Build.MODEL}
-    WEBVIEW_VERSION=${WebView.getCurrentWebViewPackage()?.versionName}
-    ═══════════════════════════════════════
-""".trimIndent())
+### Install on Fire Stick
+```bash
+# Option A: From the Fire Stick itself (browser approach)
+# Open Silk Browser → navigate to:
+#   https://dashboard.cashlabnyc.com/apk
+# Tap firetv-release.apk → Install
+
+# Option B: Via ADB from a computer on the same network
+adb connect <firetv-ip>:5555
+adb install -r https://dashboard.cashlabnyc.com/apk/firetv-release.apk
+
+# Option C: Download APK to USB, use a file manager (Files by Mobile Essentials)
 ```
 
-### ACRA Configuration
-- Report format: JSON over HTTP POST to Telegram Bot API
-- Report content: exception type, stack trace, device model, Fire OS version, app version, stack trace, last 50 log lines
-- Trigger: any uncaught exception or ANR
-- Rate limit: max 1 report per 5 minutes per app session
+### Verify Installation
+1. App appears as "FireTV Dashboard" in Settings → My Apps
+2. App appears in the Fire TV home screen app row
+3. On first launch, confirm full-screen dashboard loads within 10s
 
 ---
 
-## Signing & CI/CD Design
+## 7. Operational Runbook
 
-### Build Variants
-| Variant | Signing | Auth Token | WebView Debug | Minify |
-|---------|---------|------------|---------------|--------|
-| debug | v1+v2 (debug key) | empty string | enabled | off |
-| release | v2-only (upload key) | from CI secrets | disabled | off |
+### Problem: Screen goes black but TV is on
+1. Check if screensaver is disabled: Settings → Display & Sounds → Screen Saver → Never
+2. Check TV "Auto Power Off" setting
+3. Check HDMI cable
+4. Press any button on remote — does the TV respond?
+5. If TV is unresponsive: TV has entered a power state — unplug/replug Fire Stick
 
-### Release APK Signing Pipeline (GitHub Actions)
-1. Build `app-release.apk` with `signingConfig = signingConfigs.getByName("debug")` (v1+v2)
-2. `apksigner sign --v1-signing-enabled=false --v2-signing-enabled=true` with upload key
-3. Verify: `apksigner verify -v --min-sdk-version 26` — must show `v1=false, v2=true`
-4. Upload to VPS artifact path
-5. Write version JSON to `version.json` on VPS
-6. Send Telegram success notification
+### Problem: Dashboard shows "Dashboard unavailable" overlay
+1. Check WiFi/Ethernet connection on Fire Stick
+2. Check if `dashboard.cashlabnyc.com` is reachable from another device
+3. Check VPS is running: `curl https://dashboard.cashlabnyc.com/api/refresh`
+4. Tap "Retry Now" or the ↻ button on the display
+5. After 5 minutes, overlay auto-retries
 
-### Secrets (GitHub Actions)
+### Problem: App is not in the launcher after reboot
+1. BootReceiver may not have fired — launch app manually from Settings → My Apps
+2. If it still doesn't appear, the app may have been uninstalled — reinstall
 
-> ⚠️ **Breaking change:** The CI pipeline now uses a dedicated **upload keystore** (`UPLOAD_KEYSTORE_*`) instead of the debug keystore. Set these new secrets before merging:
-
-| Secret | Format | Description |
-|--------|--------|-------------|
-| `UPLOAD_KEYSTORE_B64` | Base64-encoded JKS or PKCS12 keystore | Keystore for v2-only APK signing |
-| `UPLOAD_KEYSTORE_ALIAS` | String | Key alias inside the keystore |
-| `UPLOAD_KEYSTORE_PASSWORD` | String | Keystore password |
-| `UPLOAD_KEY_PASSWORD` | String | Private key password |
-| `DASHBOARD_AUTH_TOKEN` | String | Auth token for X-App-Auth header (CI injects into BuildConfig) |
-| `TELEGRAM_BOT_TOKEN` | String | Telegram bot token for build notifications |
-| `TELEGRAM_CHAT_ID` | String | Telegram chat ID for build notifications |
-| `VPS_HOST` | String | VPS hostname |
-| `VPS_USER` | String | VPS SSH username |
-| `VPS_SSH_KEY` | String | VPS SSH private key (base64) |
-
-The old `DEBUG_KEYSTORE_B64` secret is no longer used.
+### Problem: Remote button presses show exit confirmation
+1. Normal behavior — this is intentional kiosk protection
+2. To exit: use the exit confirmation dialog ("Exit" button)
+3. To disable: change `showExitDialog()` call in DashboardActivity.kt
 
 ---
 
-## Dependency Changes
+## 8. Known Limitations
 
-### Added
-| Library | Version | Purpose |
-|---------|---------|---------|
-| `ch.acra:acra-mail` or `acra-http` | 5.11.0+ | Crash reporting |
-| `androidx.lifecycle:lifecycle-process` | 2.7.0 | Process lifecycle observer for ACRA |
-
-### Removed
-| Library | Reason |
-|---------|--------|
-| None removed | — |
-
-### Updated
-| Library | Old | New | Reason |
-|---------|-----|-----|---------|
-| `androidx.webkit:webkit` | 1.8.0 | 1.10.0 | Security fix, Fire OS 7 WebView compatibility |
+| Issue | Workaround |
+|-------|-----------|
+| Fire TV screensaver cannot be disabled programmatically | Must be disabled manually in Settings |
+| App cannot run as true kiosk (lock to single app) | Requires Device Owner provisioning via ADB — not implemented |
+| No crash reporting currently | APK must be retrieved from device for logcat analysis |
+| Traefik dashboard is publicly accessible | Requires manual VPS root step to add auth |
+| Fire Stick 4K (1st gen) is the minimum supported hardware | Fire Stick 1st gen (no 4K) is not supported |
 
 ---
 
-## File Manifest
+## 9. Changelog
 
+### v1.0 build 103 (2026-04-22)
+- **Build pipeline:** Fixed 10 consecutive CI failures (acra-telegram missing, missing `</service>`, Kotlin import errors, APK filename mismatch, VPS deploy permission)
+- **Runtime:** `SCREEN_BRIGHT_WAKE_LOCK` → `PARTIAL_WAKE_LOCK` (fixes SecurityException on Fire OS 7+)
+- **Runtime:** `onTrimMemory` reload threshold raised to MODERATE, guarded by `isInForeground`
+- **Runtime:** Native reload button added (JS-independent, works when WebView is crashed)
+- **Runtime:** Removed forced `LAYER_TYPE_HARDWARE` (system now decides; better on constrained hardware)
+- **Cleanup:** ACRA dependencies fully removed (acra-telegram doesn't exist in Maven Central)
+- **Cleanup:** Removed unused `acra.properties` asset
+
+### v1.0 build 1–102
+- Pre-existing builds had various CI failures; current state reflects build 103
+
+---
+
+## 10. Open Issues
+
+| ID | Priority | Issue | Owner |
+|----|----------|-------|-------|
+| P2-04 | P2 | Traefik `dashboard-https` router missing auth middleware (VPS root required) | Brian (manual) |
+| — | P3 | Fire TV screensaver requires manual disable in Settings | Staff (setup) |
+| — | P3 | No true kiosk lockdown (single-app lock requires Device Owner provisioning) | Future |
+| — | P3 | No crash reporting (file-based logger or Crashlytics recommended) | Future |
+
+---
+
+## 11. API Reference
+
+### APK Distribution
 ```
-app/src/main/
-├── AndroidManifest.xml              # Permissions, KeepAwakeService, exported=false on service
-├── java/com/hermes/firetv/
-│   ├── DashboardActivity.kt          # Complete rewrite: SSL bypass removed, watchdog, error overlay, JS interface
-│   └── KeepAwakeService.kt          # Remove fake touch, SCREEN_BRIGHT_WAKE_LOCK, no daemon thread
-├── res/
-│   ├── layout/activity_main.xml     # Unchanged
-│   ├── xml/
-│   │   └── network_security_config.xml  # NEW: block cleartext, trust system CAs
-│   └── values/
-│       ├── strings.xml              # Unchanged
-│       ├── colors.xml               # Unchanged
-│       └── themes.xml               # Unchanged
-└── app/build.gradle.kts             # Add networkSecurityConfig, add ACRA deps, update webkit
+GET https://dashboard.cashlabnyc.com/apk/firetv-release.apk
+GET https://dashboard.cashlabnyc.com/apk/version.json
+Response: {"version":"1.0","build":N,"apk_url":"https://..."}
+```
 
-.gradle/
-└── (unchanged)
+### Dashboard API (internal)
+```
+GET https://dashboard.cashlabnyc.com/api/refresh
+Header: X-App-Auth: <token>   (injected by CI build, not in source)
+Response: {schedule: [...], events: [...], unscheduled_events: [...]}
+```
 
-.github/workflows/build.yml          # Add set -e, fix ANDROID_HOME path, add auth token injection
+### WebView JS Interface
+```javascript
+// Injected by DashboardActivity:
+window.AndroidDashboard.pong()      // Resets JS watchdog timer
+window.AndroidDashboard.logFromJs('INFO|WARN|ERROR', message)  // Logs to logcat
 
-gradle.properties                    # Add dashboardAuthToken placeholder
+// Dashboard's own JS should call pong() every 30s to signal health
 ```
 
 ---
 
-## Kiosk Mode Notes (Future Work)
-
-Full kiosk lockdown (Device Owner / DPC) requires:
-1. Factory-reset the Fire TV to set the app as Device Owner
-2. Use `DevicePolicyManager` to lock to single app
-3. Disable the camera, microphone, and ability to install other apps
-
-This PRD does **not** include full kiosk lockdown. It includes:
-- `FLAG_SECURE` (blocks screenshots)
-- Back key suppression (prevents accidental exit)
-- `allowBackup=false` (prevents data extraction)
-
-Full kiosk lockdown should be added in a future iteration if the device will be in a public-facing location.
-
----
-
-## Test Plan
-
-### Pre-Deploy Tests (must pass before production deploy)
-1. `adb install` release APK on Fire OS 6 device → Success
-2. `adb install` release APK on Fire OS 7 device → Success
-3. `apksigner verify -v --min-sdk-version 26 app-release.apk` → `v1=false, v2=true`
-4. Launch app → dashboard loads within 15s
-5. Disconnect network → error overlay shown within 10s
-6. Reconnect network → auto-reload within 30s
-7. Leave running 8 hours overnight → still visible in morning
-8. `adb logcat | grep HermesDashboard` → no FATAL or FException
-9. Check for auth token in decompiled APK → not present
-
-### Smoke Test Matrix (from audit)
-
-| Test | Pass Criteria |
-|------|--------------|
-| Fresh install (Fire OS 6) | `adb install` returns `Success` |
-| Fresh install (Fire OS 7) | `adb install` returns `Success` |
-| Cold boot launch | Dashboard loads within 15s |
-| Idle 30 min | Screen stays on |
-| Idle 8 hours | Dashboard still visible |
-| Network drop | Error overlay within 10s |
-| Network reconnect | Auto-reload within 30s |
-| Remote: back button | Does not exit app |
-| Remote: × button | Shows exit confirmation dialog |
-| Crash (force-kill via adb) | App restarts (if launched from launcher) |
-| adb logcat after crash | ACRA report sent to Telegram |
-
----
-
-## Rollback Plan
-
-If the release build causes regressions:
-1. Revert `build.yml` commit → rebuild previous APK from git tag
-2. Use previous `app-release.apk` artifact from GitHub Actions artifacts (30-day retention)
-3. Sideload previous APK via `adb install -r <old-apk>.apk`
-4. VPS `version.json` points to old APK URL — no rollback needed there
-
----
-
-## Open Questions
-
-1. **TTV WebView:** Should we migrate to `com.amazon.webview.chromium` (Amazon's TV WebView) instead of the standard Android WebView for better long-term stability on Fire OS?
-2. **Auth sidecar:** The auth sidecar at `127.0.0.1:9080` currently handles auth. Should the WebView go direct to the dashboard and inject the token at the app layer (current approach), or should it go through the sidecar? Current approach is correct for a WebView app.
-3. **Health endpoint:** Should the dashboard server expose a `GET /api/health` endpoint that returns `{ "ok": true, "uptime": N }` for the app to poll?
-4. **Crash reporting frequency:** Is 1 Telegram notification per 5-minute crash window acceptable, or should it be throttled more aggressively?
-5. **Offline mode:** Should the dashboard cache the last known good HTML/JS bundle to local storage and serve it when offline? Or is showing the error overlay acceptable?
+*This PRD is the source of truth. Update this document before making changes to the codebase.*

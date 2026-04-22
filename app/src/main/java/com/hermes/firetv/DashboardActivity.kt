@@ -62,6 +62,10 @@ class DashboardActivity : AppCompatActivity() {
     private lateinit var rootView: FrameLayout
     private lateinit var windowInsetsController: WindowInsetsControllerCompat
 
+    // ── Foreground tracking ──────────────────────────────────────────────────
+    // Guards onTrimMemory reloads — we only want to reload when actually visible.
+    private var isInForeground = false
+
     // ── Watchdog state ────────────────────────────────────────────────────────
     // Tracks last JS pong — reloaded if no pong for STALE_THRESHOLD_MS.
     private var lastJsPongMs: Long = 0L
@@ -108,6 +112,7 @@ class DashboardActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        isInForeground = true
         webView.onResume()
         lastJsPongMs = System.currentTimeMillis()
         scheduleWatchdogCheck()
@@ -116,6 +121,7 @@ class DashboardActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        isInForeground = false
         webView.onPause()
         handler.removeCallbacks(watchdogRunnable)
         handler.removeCallbacks(retryRunnable)
@@ -136,19 +142,29 @@ class DashboardActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    // Low-memory signal from the system. Reload the WebView to release memory.
+    /**
+     * Memory pressure handler.
+     *
+     * Guards:
+     *   - isInForeground — never reload if the app is not visible
+     *   - TRIM_MEMORY_MODERATE — don't reload on BACKGROUND (fires too often)
+     *     Only reload on MODERATE (50) or higher, which indicates genuine
+     *     system memory pressure, not just normal app backgrounding.
+     */
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         Log.w(TAG, "onTrimMemory level=$level")
+        if (!isInForeground) {
+            Log.d(TAG, "onTrimMemory — not in foreground, skipping reload")
+            return
+        }
         when {
             level >= TRIM_MEMORY_MODERATE -> {
                 Log.w(TAG, "Memory pressure ≥ MODERATE — reloading WebView to release memory")
                 webView.reload()
             }
-            level >= TRIM_MEMORY_BACKGROUND -> {
-                Log.w(TAG, "Memory pressure ≥ BACKGROUND — proactive reload")
-                webView.reload()
-            }
+            // TRIM_MEMORY_BACKGROUND (40) intentionally ignored — it fires on every
+            // onPause and does not indicate actual memory pressure on a constrained device.
         }
     }
 
@@ -253,6 +269,31 @@ class DashboardActivity : AppCompatActivity() {
         }
         exitBtn.setOnClickListener { showExitDialog() }
 
+        // Native reload button — bottom-right corner.
+        // This works even if the WebView JS is crashed or the page is blanked.
+        // Semi-transparent, unobtrusive, D-pad-navigable for Fire remote.
+        val reloadBtn = TextView(this).apply {
+            text = "\u21BB Reload"   // ↻
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            gravity = android.view.Gravity.CENTER
+            layoutParams = FrameLayout.LayoutParams(120, 56).apply {
+                gravity = android.view.Gravity.BOTTOM or android.view.Gravity.END
+                setMargins(0, 0, 32, 32)
+            }
+            setBackgroundColor(0x66000000)
+            alpha = 0.6f
+            isFocusable = true
+            isClickable = true
+        }
+        reloadBtn.setOnClickListener {
+            Log.d(TAG, "Native reload button tapped — forcing reload")
+            consecutiveErrors = 0
+            isRetryPending = false
+            handler.removeCallbacks(retryRunnable)
+            webView.reload()
+        }
+
         // ── WebView settings ──────────────────────────────────────────────
         val settings: WebSettings = webView.settings
         settings.javaScriptEnabled = true
@@ -265,8 +306,10 @@ class DashboardActivity : AppCompatActivity() {
         // Reject mixed content (HTTP sub-resources on an HTTPS page).
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
 
-        // Hardware layer for GPU-accelerated rendering.
-        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        // Hardware layer removed — let the system decide.
+        // On constrained Fire Stick hardware, forcing LAYER_TYPE_HARDWARE can cause
+        // display corruption under GPU memory pressure. System default is safer.
+        // webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
 
         // Remote debugging — debug builds only.
         // Enables Chrome DevTools: chrome://inspect/#devices on desktop (same network).
@@ -277,6 +320,7 @@ class DashboardActivity : AppCompatActivity() {
 
         rootView.addView(webView)
         rootView.addView(exitBtn)
+        rootView.addView(reloadBtn)
         setContentView(rootView)
 
         // ── WebView clients ────────────────────────────────────────────────

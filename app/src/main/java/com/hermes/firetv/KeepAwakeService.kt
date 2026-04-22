@@ -106,8 +106,14 @@ class KeepAwakeService : Service() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
 
         wakeLock = pm.newWakeLock(
-            PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
-            PowerManager.ACQUIRE_CAUSES_WAKEUP,
+            // PARTIAL_WAKE_LOCK is correct here:
+            //   - Keeps the CPU alive so the WebView timer (JS watchdog) keeps ticking
+            //   - The Activity's FLAG_KEEP_SCREEN_ON (DashboardActivity.kt) handles
+            //     keeping the physical screen on
+            //   - SCREEN_BRIGHT_WAKE_LOCK + ACQUIRE_CAUSES_WAKEUP throws SecurityException
+            //     on Android 12+ (Fire OS 7+) when held by a foreground service
+            //     that is not the topmost app
+            PowerManager.PARTIAL_WAKE_LOCK,
             "FireTVDashboard::ScreenAwake"
         )
 

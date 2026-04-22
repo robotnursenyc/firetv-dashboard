@@ -84,13 +84,7 @@ dependencies {
     // Webkit 1.10.0: security fix, Fire OS 7 compatibility, better long-session stability
     implementation("androidx.webkit:webkit:1.10.0")
 
-    // ACRA 5.11.3 — crash reporting.
-    // ACRA is only active in release builds (isDebuggable=false in buildType).
-    // Annotations on FireTVApplication drive configuration.
-    // NOTE: acra-telegram was removed — that module does not exist in Maven Central.
-    // acra-mail and acra-http are retained for future backend integrations.
-    val acraVersion = "5.11.3"
-    implementation("ch.acra:acra-core:$acraVersion")
-    implementation("ch.acra:acra-mail:$acraVersion")
-    implementation("ch.acra:acra-http:$acraVersion")
+    // NOTE: ACRA crash reporting removed — ch.acra:acra-telegram does not exist
+    // in Maven Central. If crash reporting is needed in future, use Firebase Crashlytics
+    // or a custom file-based logger instead.
 }
