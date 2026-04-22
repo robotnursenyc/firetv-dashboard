@@ -49,28 +49,13 @@ jobs:
           echo "sdk.dir=/usr/local/lib/android/sdk" > $GITHUB_WORKSPACE/local.properties
           echo "Created: $(cat $GITHUB_WORKSPACE/local.properties)"
 
-      # ── Inject secrets into gradle.properties and acra.properties before build ────
-      # Auth token: used in BuildConfig for X-App-Auth header.
-      # Telegram creds: used in acra.properties for crash reporting.
+      # ── Inject auth token into gradle.properties before build ────
+      # Auth token used in BuildConfig for X-App-Auth header injection.
       - name: Inject secrets for release builds
         run: |
-          # gradle.properties — auth token + versionCode from run_number
           echo "dashboardAuthToken=${{ secrets.DASHBOARD_AUTH_TOKEN }}" >> $GITHUB_WORKSPACE/gradle.properties
           echo "CI_BUILD_NUMBER=${{ github.run_number }}" >> $GITHUB_WORKSPACE/gradle.properties
           echo "Auth token + build number written to gradle.properties"
-
-          # acra.properties — Telegram crash reporting credentials
-          # ACRA 5.x correct property names (lowercase, dot-separated).
-          # These are NOT hardcoded in source; CI injects them here.
-          cat > $GITHUB_WORKSPACE/app/src/main/assets/acra.properties << 'ACRA_EOF'
-          acra.enable=true
-          acra.reportFormat=JSON
-          acra.unsafeDeviceEncryption=false
-          acra.telegram.enabled=true
-          acra.telegram.botToken=${{ secrets.TELEGRAM_BOT_TOKEN }}
-          acra.telegram.chatId=${{ secrets.TELEGRAM_CHAT_ID }}
-          ACRA_EOF
-          echo "acra.properties written (Telegram credentials injected)"
 
       - name: Build release APK
         continue-on-error: true
@@ -224,19 +209,7 @@ jobs:
               echo \"{\\\"version\\\":\\\"1.0\\\",\\\"build\\\":${BUILD_NUM},\\\"apk_url\\\":\\\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\\\"}\" > /usr/share/nginx/html/apk/version.json
             ' && echo VPS deploy complete"
 
-      # ── Notify on success ─────────────────────────────────────────────────────
-      - name: Notify Telegram on success
-        if: success()
-        run: |
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d "text=✅ FireTV APK deployed to VPS. Build %23${{ github.run_number }}. URL: https://dashboard.cashlabnyc.com/apk/firetv-release.apk" \
-            2>&1 | tail -3
-
-      - name: Notify Telegram on failure
-        if: failure()
-        run: |
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d "text=❌ FireTV APK build FAILED. Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            2>&1 | tail -3
+      # NOTE: Telegram build notifications removed — TELEGRAM_BOT_TOKEN secret
+      # refers to Brian's personal bot which does not have permission to send
+      # messages to the notification chat. Build status is tracked via GitHub UI.
+      # To re-enable: provide a valid bot token + chat_id pair in repo secrets.
