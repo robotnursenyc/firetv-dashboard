@@ -161,12 +161,13 @@ jobs:
           $ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 "$APK_OUT" 2>&1
 
           VERIFY_OUT=$($ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 "$APK_OUT" 2>&1)
-          if echo "$VERIFY_OUT" | grep -q "Verified using v1 scheme (JAR signing)"; then
+          # Only fail if v1 is TRUE. The ": false" value sits on a separate line.
+          if echo "$VERIFY_OUT" | grep -E "Verified using v1 scheme.*: true" > /dev/null 2>&1; then
             echo "ERROR: v1 signature still present!"
             exit 1
           fi
           if echo "$VERIFY_OUT" | grep -q "Verified using v2 scheme"; then
-            echo "SUCCESS: APK is signed v2-only (FireTV compatible)"
+            echo "SUCCESS: APK is signed v2+v3 only (v1 stripped — FireTV compatible)"
           fi
 
           echo "=== Copying signed APK back ==="
