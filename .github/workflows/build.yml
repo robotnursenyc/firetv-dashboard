@@ -180,20 +180,34 @@ jobs:
           echo "=== Deploying firetv-release.apk (build #${BUILD_NUM}) ==="
           echo "APK size: $(du -h "$LOCAL_APK" | cut -f1)"
 
-          # hermes user cannot write to host /tmp/ or /opt/data/home/.
-          # Use: cat APK | ssh | docker exec -i  (single SSH connection, atomic)
-          # The entire deploy runs as ONE ssh command — no multi-command shell string.
-          # Both the APK write AND the cp/version.json update happen in one SSH session.
+          # hermes user cannot write to host filesystem.
+          # TWO separate SSH commands to avoid stdin sharing between the APK pipe
+          # and the deploy script. If stdin is shared (cmd1 && cmd2 < apk), the
+          # first command drains the APK bytes and the second command never runs.
+          #
+          # Step 1: upload deploy script (no stdin from APK needed)
+          # Step 2: pipe APK bytes into container stdin (script already written)
+          ssh -o StrictHostKeyChecking=no -o BatchMode=yes \
+             -i /tmp/vps_key "$VPS_USER@$VPS_HOST" \
+             "docker exec -i apk-serve sh -c 'cat > /tmp/deploy_apk.sh' << 'SCRIPT_EOF'
+#!/bin/sh
+set -e
+cat > /tmp/firetv-release.apk
+cp /tmp/firetv-release.apk /usr/share/nginx/html/apk/firetv-release.apk
+chmod 644 /usr/share/nginx/html/apk/firetv-release.apk
+echo \"{\\\"version\\\":\\\"1.0\\\",\\\"build\\\":${BUILD_NUM},\\\"apk_url\\\":\\\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\\\"}\" > /usr/share/nginx/html/apk/version.json
+echo \"DEPLOY_OK\"
+sha256sum /usr/share/nginx/html/apk/firetv-release.apk
+rm -f /tmp/deploy_apk.sh
+SCRIPT_EOF"
+
+          echo "=== Script uploaded, piping APK ==="
+
+          # Step 2: pipe APK into the already-uploaded deploy script
           cat "$LOCAL_APK" | \
             ssh -o StrictHostKeyChecking=no -o BatchMode=yes \
                -i /tmp/vps_key "$VPS_USER@$VPS_HOST" \
-               "docker exec -i apk-serve sh -c 'cat > /tmp/firetv-release.apk' \
-                && docker exec apk-serve sh -c ' \
-                    cp /tmp/firetv-release.apk /usr/share/nginx/html/apk/firetv-release.apk \
-                    && chmod 644 /usr/share/nginx/html/apk/firetv-release.apk \
-                    && echo {\"version\":\"1.0\",\"build\":${BUILD_NUM},\"apk_url\":\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\"} > /usr/share/nginx/html/apk/version.json \
-                    && echo DEPLOY_OK \
-                    && docker exec apk-serve sha256sum /usr/share/nginx/html/apk/firetv-release.apk'"
+               "docker exec -i apk-serve sh -c 'sh /tmp/deploy_apk.sh'"
 
           DEPLOY_STATUS=$?
           if [ $DEPLOY_STATUS -ne 0 ]; then
