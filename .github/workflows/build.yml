@@ -65,7 +65,7 @@ jobs:
           gradle assembleRelease --no-daemon 2>&1 | tail -30
           find . -name "*.apk" 2>/dev/null
 
-      - name: Fix APK signatures (strip v1 sigs, keep v2 only)
+      - name: Fix APK signatures (strip v1, keep v2 only, re-sign with debug key)
         env:
           DEBUG_KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_B64 }}
         run: |
@@ -73,20 +73,20 @@ jobs:
           mkdir -p ~/.android
           echo "$DEBUG_KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
           APK_IN="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
-          # Unzip, remove v1 signature files, repack
-          cd /tmp
-          mkdir -p unsigned_apk
-          cp "$APK_IN" unsigned.apk
-          cd unsigned_apk
-          unzip -q ../unsigned.apk
-          # Remove v1 signature entries (keep CERT.RSA/CERT.SF which are v2)
-          rm -f META-INF/CASHLAB-.SF META-INF/CASHLAB-.RSA META-INF/MANIFEST.MF
-          # Repack APK
-          zip -q -r ../fixed.apk *
-          cd ..
-          # Verify v2-only APK
-          $ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 fixed.apk
-          mv fixed.apk "$APK_IN"
+          # Use apksigner to strip v1 and re-sign v2-only with debug keystore
+          # This removes all existing signatures and applies fresh v2-only sig
+          $ANDROID_HOME/build-tools/34.0.0/apksigner sign \
+            --v1-signing-enabled false \
+            --v2-signing-enabled true \
+            --ks ~/.android/debug.keystore \
+            --ks-key-alias androiddebugkey \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out /tmp/fixed.apk \
+            "$APK_IN"
+          # Verify v2-only
+          $ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 /tmp/fixed.apk
+          mv /tmp/fixed.apk "$APK_IN"
 
       - name: Upload APK as artifact
         if: always()
