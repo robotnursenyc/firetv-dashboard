@@ -5,8 +5,13 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// Read auth token from gradle.properties (injected by CI script).
-// Fallback to empty string for local debug builds.
+// Read injected values from gradle.properties (CI injects these at build time).
+// Fallback to 0 for local debug builds.
+val ciBuildNumber: String = run {
+    val props = Properties()
+    project.rootProject.file("gradle.properties").inputStream().use { props.load(it) }
+    props.getProperty("CI_BUILD_NUMBER", "0")
+}
 val dashboardAuthToken: String = run {
     val props = Properties()
     project.rootProject.file("gradle.properties").inputStream().use { props.load(it) }
@@ -21,8 +26,10 @@ android {
         applicationId = "com.hermes.firetv"
         minSdk = 22
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        // CI_BUILD_NUMBER is injected by the workflow: 1, 2, 3… each run.
+        // Falls back to 1 in local builds so debug APKs have a valid versionCode.
+        versionCode = (ciBuildNumber.toIntOrNull() ?: 1).coerceAtLeast(1)
+        versionName = "1.0.${ciBuildNumber.toIntOrNull() ?: 0}"
 
         ndk {
             abiFilters += listOf("armeabi-v7a", "arm64-v8a")
@@ -77,7 +84,7 @@ dependencies {
     // Webkit 1.10.0: security fix, Fire OS 7 compatibility, better long-session stability
     implementation("androidx.webkit:webkit:1.10.0")
 
-    // ACRA 5.11.3 — crash reporting via HTTP POST to crash relay.
+    // ACRA 5.11.3 — crash reporting via Telegram.
     // ACRA is only active in release builds (isDebuggable=false in buildType).
     // Annotations on FireTVApplication drive configuration.
     val acraVersion = "5.11.3"

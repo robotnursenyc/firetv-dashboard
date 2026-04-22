@@ -9,8 +9,8 @@
 *.jar
 *.log
 
-# Gradle
-.gradle/
+# Gradle (recursive)
+**/.gradle/
 !gradle/wrapper/gradle-wrapper.jar
 
 # Local config (contains secrets — never commit)
@@ -43,3 +43,4 @@ Thumbs.db
 # SSH keys
 *.pem
 id_rsa*
+app/.gradle/

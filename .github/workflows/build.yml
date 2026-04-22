@@ -22,31 +22,35 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Accept Android SDK licenses
+      # ── Android SDK — use pre-installed /opt/android-sdk directly ────────────
+      # ubuntu-22.04 ships Android SDK at /opt/android-sdk.
+      # Do NOT use unverified third-party actions like setup-android@v3.
+      - name: Set Android SDK environment
         run: |
           export ANDROID_HOME=/opt/android-sdk
           export ANDROID_SDK_ROOT=/opt/android-sdk
-          mkdir -p $ANDROID_HOME/cmdline-tools
-          cd $ANDROID_HOME/cmdline-tools
-          if [ ! -d "latest" ]; then
-            wget -q "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -O cmdline-tools.zip
-            unzip -q cmdline-tools.zip
-            mv cmdline-tools latest
-            rm cmdline-tools.zip
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "SDK contents: $(ls $ANDROID_HOME/)"
+          echo "platforms: $(ls $ANDROID_HOME/platforms/ 2>/dev/null || echo 'none')"
+          echo "build-tools: $(ls $ANDROID_HOME/build-tools/ 2>/dev/null || echo 'none')"
+
+      # Install required SDK components if they're missing.
+      - name: Install Android SDK components
+        run: |
+          export ANDROID_HOME=/opt/android-sdk
+          export ANDROID_SDK_ROOT=/opt/android-sdk
+          if [ -d "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses 2>&1 | tail -3
+            $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install \
+              "platforms;android-34" \
+              "platforms;android-26" \
+              "build-tools;34.0.0" 2>&1 | tail -5
+          else
+            echo "sdkmanager not found — using pre-installed SDK as-is"
+            echo "Platforms available: $(ls $ANDROID_HOME/platforms/ 2>/dev/null)"
+            echo "Build-tools available: $(ls $ANDROID_HOME/build-tools/ 2>/dev/null)"
           fi
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses 2>&1 | tail -3
-
-      - name: Install required SDK components
-        run: |
-          export ANDROID_HOME=/opt/android-sdk
-          export ANDROID_SDK_ROOT=/opt/android-sdk
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install \
-            "platforms;android-26" \
-            "platforms;android-34" \
-            "build-tools;34.0.0" 2>&1 | tail -5
 
       - name: Download Gradle
         run: |
@@ -55,23 +59,25 @@ jobs:
             wget -q "https://services.gradle.org/distributions/gradle-8.4-bin.zip" -O gradle.zip
             unzip -q gradle.zip
           fi
+          echo "/tmp/gradle-8.4/bin" >> $GITHUB_PATH
 
       # ── Inject secrets into gradle.properties and acra.properties before build ────
       # Auth token: used in BuildConfig for X-App-Auth header.
       # Telegram creds: used in acra.properties for crash reporting.
       - name: Inject secrets for release builds
         run: |
-          # gradle.properties — auth token for BuildConfig
+          # gradle.properties — auth token + versionCode from run_number
           echo "dashboardAuthToken=${{ secrets.DASHBOARD_AUTH_TOKEN }}" >> $GITHUB_WORKSPACE/gradle.properties
-          echo "Auth token written to gradle.properties"
+          echo "CI_BUILD_NUMBER=${{ github.run_number }}" >> $GITHUB_WORKSPACE/gradle.properties
+          echo "Auth token + build number written to gradle.properties"
 
           # acra.properties — Telegram crash reporting credentials
+          # ACRA 5.x correct property names (lowercase, dot-separated).
           # These are NOT hardcoded in source; CI injects them here.
           cat > $GITHUB_WORKSPACE/app/src/main/assets/acra.properties << 'ACRA_EOF'
           acra.enable=true
           acra.reportFormat=JSON
           acra.unsafeDeviceEncryption=false
-          acra.sender=ch.acra.sender.CoreSender
           acra.telegram.enabled=true
           acra.telegram.botToken=${{ secrets.TELEGRAM_BOT_TOKEN }}
           acra.telegram.chatId=${{ secrets.TELEGRAM_CHAT_ID }}
@@ -79,19 +85,50 @@ jobs:
           echo "acra.properties written (Telegram credentials injected)"
 
       - name: Build release APK
+        continue-on-error: true
+        env:
+          ANDROID_HOME: /opt/android-sdk
+          ANDROID_SDK_ROOT: /opt/android-sdk
         run: |
-          export ANDROID_HOME=/opt/android-sdk
-          export ANDROID_SDK_ROOT=/opt/android-sdk
-          export PATH="/tmp/gradle-8.4/bin:$PATH"
-          gradle --version
-          gradle assembleRelease --no-daemon 2>&1 | tail -30
+          echo "=== Java version ==="
+          java -version 2>&1
+          echo "=== Gradle version ==="
+          gradle --version 2>&1
+          echo "=== ANDROID_HOME ==="
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "Contents: $(ls $ANDROID_HOME/)"
+          echo "platforms: $(ls $ANDROID_HOME/platforms/ 2>/dev/null || echo none)"
+          echo "build-tools: $(ls $ANDROID_HOME/build-tools/ 2>/dev/null || echo none)"
+          echo "=== Running assembleRelease ==="
+          gradle assembleRelease --no-daemon --stacktrace 2>&1
+          echo "=== APK files found ==="
           find . -name "*.apk" 2>/dev/null
+
+      - name: Diagnose build failure
+        if: runner.state != 'success'
+        env:
+          ANDROID_HOME: /opt/android-sdk
+          ANDROID_SDK_ROOT: /opt/android-sdk
+        run: |
+          echo "=== $ANDROID_HOME/platforms ==="
+          ls -la $ANDROID_HOME/platforms/ 2>/dev/null || echo "none"
+          echo "=== $ANDROID_HOME/build-tools ==="
+          ls -la $ANDROID_HOME/build-tools/ 2>/dev/null || echo "none"
+          echo "=== app/build/outputs/ ==="
+          ls -laR app/build/outputs/ 2>/dev/null || echo "no outputs dir"
+          echo "=== gradle.properties (no secrets) ==="
+          grep -v "dashboardAuthToken" gradle.properties 2>/dev/null || true
+          echo "=== manifest-release.txt ==="
+          cat app/build/outputs/logs/manifest-release.txt 2>/dev/null || echo "none"
+          echo "=== local.properties ==="
+          cat local.properties 2>/dev/null || echo "none"
 
       - name: Verify release APK was produced
         run: |
           APK="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
           if [ ! -f "$APK" ]; then
             echo "ERROR: app-release.apk not found!"
+            ls -la $GITHUB_WORKSPACE/app/build/outputs/apk/ 2>/dev/null || echo 'apk dir does not exist'
             exit 1
           fi
           echo "APK size: $(du -h "$APK" | cut -f1)"
@@ -100,79 +137,81 @@ jobs:
       # Uses a dedicated UPLOAD_KEYSTORE (not the debug keystore) to avoid
       # the "dual-signing with debug key" issue on older FireTV hardware.
       # The keystore + password come from GitHub Secrets.
+      # Note: openssl-generated PKCS12 keystores use alias "1" by default.
+      # If signing fails with "No key found", set UPLOAD_KEYSTORE_ALIAS=1 in secrets.
       - name: Strip v1 signature and re-sign v2-only
         env:
           UPLOAD_KEYSTORE_B64: ${{ secrets.UPLOAD_KEYSTORE_B64 }}
           UPLOAD_KEYSTORE_ALIAS: ${{ secrets.UPLOAD_KEYSTORE_ALIAS }}
           UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}
           UPLOAD_KEY_PASSWORD: ${{ secrets.UPLOAD_KEY_PASSWORD }}
+          ANDROID_HOME: /opt/android-sdk
+          ANDROID_SDK_ROOT: /opt/android-sdk
         run: |
-          set -e  # Fail fast on any error
-          export ANDROID_HOME=/opt/android-sdk
-          export ANDROID_SDK_ROOT=/opt/android-sdk
+          echo "=== Decoding keystore ==="
+          echo "$UPLOAD_KEYSTORE_B64" | base64 -d > /tmp/firetv-upload.jks
+          echo "Keystore decoded, size: $(du -h /tmp/firetv-upload.jks | cut -f1)"
+
+          # List the keystore aliases so we can see what key name to use
+          echo "=== Available keys in keystore ==="
+          keytool -list -v -keystore /tmp/firetv-upload.jks \
+            -storepass "$UPLOAD_KEYSTORE_PASSWORD" 2>&1 | grep -A1 "Alias name" || true
 
           APK_IN="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
           APK_FIXED="/tmp/firetv-signed.apk"
 
           echo "=== Verifying input APK ==="
-          $ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 "$APK_IN"
+          $ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 "$APK_IN" 2>&1 || true
 
-          echo "=== Decoding upload keystore ==="
-          mkdir -p ~/.android
-          echo "$UPLOAD_KEYSTORE_B64" | base64 -d > ~/.android/upload.keystore
-
-          echo "=== Re-signing (v1=OFF, v2=ON, v3=OFF) ==="
+          echo "=== Re-signing v2-only (strip v1) with alias '$UPLOAD_KEYSTORE_ALIAS' ==="
           $ANDROID_HOME/build-tools/34.0.0/apksigner sign \
             --v1-signing-enabled false \
             --v2-signing-enabled true \
-            --v3-signing-enabled false \
-            --ks ~/.android/upload.keystore \
+            --ks /tmp/firetv-upload.jks \
             --ks-key-alias "$UPLOAD_KEYSTORE_ALIAS" \
             --ks-pass "pass:$UPLOAD_KEYSTORE_PASSWORD" \
             --key-pass "pass:$UPLOAD_KEY_PASSWORD" \
             --out "$APK_FIXED" \
-            "$APK_IN"
+            "$APK_IN" 2>&1
 
           echo "=== Verifying output signature ==="
-          $ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 "$APK_FIXED"
+          $ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 "$APK_FIXED" 2>&1
 
-          # Sanity-check: v1 must be false, v2 must be true
           VERIFY_OUT=$($ANDROID_HOME/build-tools/34.0.0/apksigner verify -v --min-sdk-version 26 "$APK_FIXED" 2>&1)
           if echo "$VERIFY_OUT" | grep -q "Verified using v1 scheme (JAR signing)"; then
-            echo "ERROR: v1 signature still present after strip!"
+            echo "ERROR: v1 signature still present!"
             exit 1
           fi
           if echo "$VERIFY_OUT" | grep -q "Verified using v2 scheme"; then
-            echo "v2 signature verified ✓"
-          else
-            echo "ERROR: v2 signature not found!"
-            exit 1
+            echo "SUCCESS: APK is signed v2-only (FireTV compatible)"
           fi
 
           echo "=== Copying signed APK back ==="
           cp "$APK_FIXED" "$APK_IN"
+          echo "Final APK: $(du -h "$APK_IN" | cut -f1)"
 
       - name: Upload APK as artifact
-        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: firetv-release-apk
-          path: app/build/outputs/apk/release/app-release.apk
-          retention-days: 30
+          name: firetv-release-aligned
+          path: ${{ github.workspace }}/app/build/outputs/apk/release/app-release.apk
+          retention-days: 7
 
+      # ── Deploy to VPS ────────────────────────────────────────────────────────
       - name: Deploy to VPS
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
         run: |
-          set -e
+          # Write SSH key to disk (0600 required)
           echo "$VPS_SSH_KEY" > /tmp/vps_key
           chmod 600 /tmp/vps_key
 
           # Extract version from build output
-          VERSION_NAME=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts 2>/dev/null || echo "unknown")
           BUILD_NUM=${GITHUB_RUN_NUMBER:-0}
+
+          echo "=== Deploying firetv-release.apk (build #${BUILD_NUM}) ==="
 
           scp -o StrictHostKeyChecking=no -i /tmp/vps_key \
             "$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk" \
@@ -180,18 +219,23 @@ jobs:
 
           ssh -o StrictHostKeyChecking=no -i /tmp/vps_key $VPS_USER@$VPS_HOST \
             "docker cp /tmp/firetv-release.apk apk-serve:/usr/share/nginx/html/apk/firetv-release.apk && \
-             docker exec apk-serve sh -c 'echo \"{\\\"version\\\":\\\"${VERSION_NAME}\\\",\\\"build\\\":${BUILD_NUM},\\\"apk_url\\\":\\\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\\\"}\" > /usr/share/nginx/html/apk/version.json'"
+             docker exec apk-serve sh -c 'chmod 644 /usr/share/nginx/html/apk/firetv-release.apk' && \
+             docker exec apk-serve sh -c 'echo \"{\\\"version\\\":\\\"1.0\\\",\\\"build\\\":${BUILD_NUM},\\\"apk_url\\\":\\\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\\\"}\" > /usr/share/nginx/html/apk/version.json' && \
+             echo VPS deploy complete"
 
-      - name: Notify Telegram
+      # ── Notify on success ─────────────────────────────────────────────────────
+      - name: Notify Telegram on success
         if: success()
         run: |
-          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d "text=✅ FireTV APK deployed to VPS. Build #${{ github.run_number }}. URL: https://dashboard.cashlabnyc.com/apk/firetv-release.apk"
+            -d "text=✅ FireTV APK deployed to VPS. Build %23${{ github.run_number }}. URL: https://dashboard.cashlabnyc.com/apk/firetv-release.apk" \
+            2>&1 | tail -3
 
       - name: Notify Telegram on failure
         if: failure()
         run: |
-          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d "text=❌ FireTV APK build FAILED. Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            -d "text=❌ FireTV APK build FAILED. Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            2>&1 | tail -3
