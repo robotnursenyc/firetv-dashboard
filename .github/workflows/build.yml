@@ -166,6 +166,9 @@ jobs:
           retention-days: 7
 
       # ── Deploy to VPS ────────────────────────────────────────────────────────
+      # Strategy: write deploy script to LOCAL file, scp it, then run it.
+      # -T disables PTY (required on GitHub Actions runners — PTY allocation fails silently)
+      # Separate SSH calls avoid stdin sharing between scp and the APK pipe.
       - name: Deploy to VPS
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
@@ -180,49 +183,48 @@ jobs:
           echo "=== Deploying firetv-release.apk (build #${BUILD_NUM}) ==="
           echo "APK size: $(du -h "$LOCAL_APK" | cut -f1)"
 
-          # hermes user cannot write to host filesystem.
-          # TWO separate SSH commands to avoid stdin sharing between the APK pipe
-          # and the deploy script. If stdin is shared (cmd1 && cmd2 < apk), the
-          # first command drains the APK bytes and the second command never runs.
-          #
-          # Step 1: upload deploy script (no stdin from APK needed)
-          # Step 2: pipe APK bytes into container stdin (script already written)
-          echo "=== STEP 1: Uploading deploy script ==="
-          ssh -o StrictHostKeyChecking=no -o BatchMode=yes \
-             -i /tmp/vps_key "$VPS_USER@$VPS_HOST" \
-             "docker exec -i apk-serve sh -c 'cat > /tmp/deploy_apk.sh' << 'SCRIPT_EOF'
+          # Write deploy script to a LOCAL temp file first (avoids all heredoc quoting issues)
+          cat > /tmp/deploy_apk.sh << 'LOCALSCRIPT'
 #!/bin/sh
 set -e
 cat > /tmp/firetv-release.apk
 cp /tmp/firetv-release.apk /usr/share/nginx/html/apk/firetv-release.apk
 chmod 644 /usr/share/nginx/html/apk/firetv-release.apk
-echo \"{\\\"version\\\":\\\"1.0\\\",\\\"build\\\":${BUILD_NUM},\\\"apk_url\\\":\\\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\\\"}\" > /usr/share/nginx/html/apk/version.json
+echo "{\"version\":\"1.0\",\"build\":${BUILD_NUM},\"apk_url\":\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\"}" > /usr/share/nginx/html/apk/version.json
 echo DEPLOY_OK
 sha256sum /usr/share/nginx/html/apk/firetv-release.apk
-rm -f /tmp/deploy_apk.sh
-SCRIPT_EOF"
+LOCALSCRIPT
+
+          echo "=== STEP 1: scp deploy script to VPS ==="
+          scp -o StrictHostKeyChecking=no -T \
+             -i /tmp/vps_key /tmp/deploy_apk.sh "$VPS_USER@$VPS_HOST:/tmp/deploy_apk.sh"
           S1_EXIT=$?
           echo "=== STEP 1 exit code: $S1_EXIT ==="
-
           if [ $S1_EXIT -ne 0 ]; then
-            echo "ERROR: Script upload failed with exit $S1_EXIT"
+            echo "ERROR: scp script upload failed"
             exit 1
           fi
 
-          echo "=== Script uploaded, piping APK ==="
-
-          # Step 2: pipe APK into the already-uploaded deploy script
-          # Separate SSH command so APK stdin does NOT share with the script execution
-          echo "=== STEP 2: Piping APK (size: $(du -h "$LOCAL_APK" | cut -f1)) ==="
-          cat "$LOCAL_APK" | ssh -o StrictHostKeyChecking=no \
+          echo "=== STEP 2: copy script into container ==="
+          ssh -o StrictHostKeyChecking=no -T \
              -i /tmp/vps_key "$VPS_USER@$VPS_HOST" \
-             "docker exec -i apk-serve sh -c 'sh /tmp/deploy_apk.sh'"
+             "docker exec apk-serve cp /tmp/deploy_apk.sh /tmp/deploy_apk.sh"
           S2_EXIT=$?
           echo "=== STEP 2 exit code: $S2_EXIT ==="
-
           if [ $S2_EXIT -ne 0 ]; then
-            echo "ERROR: APK deploy failed with exit code $S2_EXIT"
-            ssh -o StrictHostKeyChecking=no -i /tmp/vps_key "$VPS_USER@$VPS_HOST" \
+            echo "ERROR: copy into container failed"
+            exit 1
+          fi
+
+          echo "=== STEP 3: Piping APK to container (size: $(du -h "$LOCAL_APK" | cut -f1)) ==="
+          cat "$LOCAL_APK" | ssh -o StrictHostKeyChecking=no -T \
+             -i /tmp/vps_key "$VPS_USER@$VPS_HOST" \
+             "docker exec -i apk-serve sh /tmp/deploy_apk.sh"
+          S3_EXIT=$?
+          echo "=== STEP 3 exit code: $S3_EXIT ==="
+          if [ $S3_EXIT -ne 0 ]; then
+            echo "ERROR: APK deploy failed"
+            ssh -o StrictHostKeyChecking=no -T -i /tmp/vps_key "$VPS_USER@$VPS_HOST" \
               "docker exec apk-serve ls -la /tmp/ 2>&1 || true"
             exit 1
           fi
