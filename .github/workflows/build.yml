@@ -108,8 +108,8 @@ jobs:
             "$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk" \
             $VPS_USER@$VPS_HOST:/tmp/firetv-release.apk
           ssh -o StrictHostKeyChecking=no -i /tmp/vps_key $VPS_USER@$VPS_HOST \
-            "docker cp /tmp/firetv-release.apk firetv-app:/usr/share/nginx/html/apk/firetv-release.apk && \
-             docker exec firetv-app sh -c 'echo \"{\\\"version\\\":\\\"1.8.1\\\",\\\"build\\\":10,\\\"apk_url\\\":\\\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\\\"}\" > /usr/share/nginx/html/apk/version.json'"
+            "docker cp /tmp/firetv-release.apk apk-serve:/usr/share/nginx/html/apk/firetv-release.apk && \
+             docker exec apk-serve sh -c 'echo \"{\\\"version\\\":\\\"1.8.1\\\",\\\"build\\\":10,\\\"apk_url\\\":\\\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\\\"}\" > /usr/share/nginx/html/apk/version.json'"
 
       - name: Notify Telegram
         if: success()
