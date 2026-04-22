@@ -18,7 +18,7 @@ android {
             abiFilters += listOf("armeabi-v7a", "arm64-v8a")
         }
 
-        buildConfigField("String", "DASHBOARD_URL", "\"https://srv1587450.hstgr.cloud\"")
+        buildConfigField("String", "DASHBOARD_URL", "\"https://dashboard.cashlabnyc.com\"")
     }
 
     buildTypes {
