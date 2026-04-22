@@ -24,7 +24,7 @@ jobs:
 
       # ── Android SDK — use pre-installed /opt/android-sdk directly ────────────
       # ubuntu-22.04 ships Android SDK at /opt/android-sdk.
-      # Do NOT use unverified third-party actions like setup-android@v3.
+      # No third-party actions needed.
       - name: Set Android SDK environment
         run: |
           export ANDROID_HOME=/opt/android-sdk
@@ -85,7 +85,6 @@ jobs:
           echo "acra.properties written (Telegram credentials injected)"
 
       - name: Build release APK
-        continue-on-error: true
         env:
           ANDROID_HOME: /opt/android-sdk
           ANDROID_SDK_ROOT: /opt/android-sdk
@@ -96,30 +95,25 @@ jobs:
           gradle --version 2>&1
           echo "=== ANDROID_HOME ==="
           echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "Contents: $(ls $ANDROID_HOME/)"
+          echo "SDK contents: $(ls $ANDROID_HOME/)"
           echo "platforms: $(ls $ANDROID_HOME/platforms/ 2>/dev/null || echo none)"
           echo "build-tools: $(ls $ANDROID_HOME/build-tools/ 2>/dev/null || echo none)"
+          echo "=== Working directory ==="
+          echo "PWD=$(pwd)"
           echo "=== Running assembleRelease ==="
           gradle assembleRelease --no-daemon --stacktrace 2>&1
           echo "=== APK files found ==="
           find . -name "*.apk" 2>/dev/null
 
-      - name: Diagnose build failure
-        if: runner.state != 'success'
-        env:
-          ANDROID_HOME: /opt/android-sdk
-          ANDROID_SDK_ROOT: /opt/android-sdk
+      # ── Diagnostic snapshot — always runs so we can see the full state ────────
+      - name: Diagnose build state
         run: |
-          echo "=== $ANDROID_HOME/platforms ==="
-          ls -la $ANDROID_HOME/platforms/ 2>/dev/null || echo "none"
-          echo "=== $ANDROID_HOME/build-tools ==="
-          ls -la $ANDROID_HOME/build-tools/ 2>/dev/null || echo "none"
-          echo "=== app/build/outputs/ ==="
-          ls -laR app/build/outputs/ 2>/dev/null || echo "no outputs dir"
-          echo "=== gradle.properties (no secrets) ==="
-          grep -v "dashboardAuthToken" gradle.properties 2>/dev/null || true
-          echo "=== manifest-release.txt ==="
-          cat app/build/outputs/logs/manifest-release.txt 2>/dev/null || echo "none"
+          echo "=== app/build/ directory ==="
+          ls -laR app/build/ 2>/dev/null | head -80 || echo "no app/build dir"
+          echo "=== find *.apk anywhere ==="
+          find . -name "*.apk" 2>/dev/null | head -20
+          echo "=== gradle.properties (auth token redacted) ==="
+          sed 's/dashboardAuthToken=.*/dashboardAuthToken=REDACTED/' gradle.properties 2>/dev/null
           echo "=== local.properties ==="
           cat local.properties 2>/dev/null || echo "none"
 
@@ -128,7 +122,9 @@ jobs:
           APK="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
           if [ ! -f "$APK" ]; then
             echo "ERROR: app-release.apk not found!"
+            echo "APK dir contents:"
             ls -la $GITHUB_WORKSPACE/app/build/outputs/apk/ 2>/dev/null || echo 'apk dir does not exist'
+            ls -la $GITHUB_WORKSPACE/app/build/outputs/ 2>/dev/null || echo 'outputs dir does not exist'
             exit 1
           fi
           echo "APK size: $(du -h "$APK" | cut -f1)"
@@ -152,10 +148,10 @@ jobs:
           echo "$UPLOAD_KEYSTORE_B64" | base64 -d > /tmp/firetv-upload.jks
           echo "Keystore decoded, size: $(du -h /tmp/firetv-upload.jks | cut -f1)"
 
-          # List the keystore aliases so we can see what key name to use
+          # Show available aliases so we know exactly what key name to use.
           echo "=== Available keys in keystore ==="
           keytool -list -v -keystore /tmp/firetv-upload.jks \
-            -storepass "$UPLOAD_KEYSTORE_PASSWORD" 2>&1 | grep -A1 "Alias name" || true
+            -storepass "$UPLOAD_KEYSTORE_PASSWORD" 2>&1 | grep -A2 "Alias name" || true
 
           APK_IN="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
           APK_FIXED="/tmp/firetv-signed.apk"
@@ -208,7 +204,6 @@ jobs:
           echo "$VPS_SSH_KEY" > /tmp/vps_key
           chmod 600 /tmp/vps_key
 
-          # Extract version from build output
           BUILD_NUM=${GITHUB_RUN_NUMBER:-0}
 
           echo "=== Deploying firetv-release.apk (build #${BUILD_NUM}) ==="
