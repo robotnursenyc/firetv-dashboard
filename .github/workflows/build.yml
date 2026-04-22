@@ -188,16 +188,16 @@ jobs:
           echo "=== STEP 1: write deploy script to container ==="
           ssh -o StrictHostKeyChecking=no -o BatchMode=yes \
              -i /tmp/vps_key "$VPS_USER@$VPS_HOST" \
-             "docker exec -i apk-serve sh -c 'cat > /tmp/deploy_apk.sh' << 'SCRIPT'
+             'docker exec -i apk-serve sh -c "cat > /tmp/deploy_apk.sh" << '"'"'SCRIPT'"'"'
 #!/bin/sh
 set -e
 cat > /tmp/firetv-release.apk
 cp /tmp/firetv-release.apk /usr/share/nginx/html/apk/firetv-release.apk
 chmod 644 /usr/share/nginx/html/apk/firetv-release.apk
-echo \"{\\\"version\\\":\\\"1.0\\\",\\\"build\\\":${BUILD_NUM},\\\"apk_url\\\":\\\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\\\"}\" > /usr/share/nginx/html/apk/version.json
+echo "{\"version\":\"1.0\",\"build\":'"${BUILD_NUM}"',\"apk_url\":\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\"}" > /usr/share/nginx/html/apk/version.json
 echo DEPLOY_OK
 sha256sum /usr/share/nginx/html/apk/firetv-release.apk
-SCRIPT"
+SCRIPT
           S1_EXIT=$?
           echo "=== STEP 1 exit code: $S1_EXIT ==="
           if [ $S1_EXIT -ne 0 ]; then
