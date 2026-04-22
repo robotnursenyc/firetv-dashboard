@@ -113,6 +113,19 @@ class DashboardActivity : AppCompatActivity() {
                 request: WebResourceRequest?
             ): WebResourceResponse? {
                 val url = request?.url?.toString() ?: return null
+                val parsed = URL(url)
+
+                // Skip static assets — let WebView load them normally
+                val path = parsed.path ?: ""
+                if (path.startsWith("/_next/") || path.startsWith("/_fragments/") || path.startsWith("/images/") || path.startsWith("/fonts/") || path.startsWith("/favicon") || path.endsWith(".js") || path.endsWith(".css") || path.endsWith(".ico") || path.endsWith(".png") || path.endsWith(".jpg") || path.endsWith(".webp") || path.endsWith(".svg") || path.endsWith(".woff") || path.endsWith(".woff2")) {
+                    return null
+                }
+
+                // Only intercept API calls and the root page — add auth header and pass through
+                if (!path.startsWith("/api/") && path != "/") {
+                    return null
+                }
+
                 return try {
                     val conn = URL(url).openConnection() as HttpURLConnection
                     conn.requestMethod = request.method
@@ -124,7 +137,7 @@ class DashboardActivity : AppCompatActivity() {
                         conn.sslSocketFactory = this@DashboardActivity.sslContext.socketFactory
                         conn.hostnameVerifier = this@DashboardActivity.hostnameVerifier
                     }
-                    val mimeType = conn.contentType ?: "text/html"
+                    val mimeType = conn.contentType ?: "application/json"
                     val inputStream: InputStream = conn.inputStream
                     val statusCode = conn.responseCode
                     val reasonPhrase = conn.responseMessage
