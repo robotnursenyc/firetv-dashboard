@@ -106,47 +106,83 @@ class DashboardActivity : AppCompatActivity() {
 
         webView.webChromeClient = WebChromeClient()
 
-        // Intercept all WebView requests and re-fetch with X-App-Auth header
+        // Intercept ALL requests to the dashboard domain, add auth header, and return with correct MIME type.
+        // Static assets (JS chunks, CSS, images) also need auth — server returns 401 without it.
         webView.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(
                 view: WebView?,
                 request: WebResourceRequest?
             ): WebResourceResponse? {
                 val url = request?.url?.toString() ?: return null
-                val parsed = URL(url)
+                val requestUrl = URL(url)
 
-                // Skip static assets — let WebView load them normally
-                val path = parsed.path ?: ""
-                if (path.startsWith("/_next/") || path.startsWith("/_fragments/") || path.startsWith("/images/") || path.startsWith("/fonts/") || path.startsWith("/favicon") || path.endsWith(".js") || path.endsWith(".css") || path.endsWith(".ico") || path.endsWith(".png") || path.endsWith(".jpg") || path.endsWith(".webp") || path.endsWith(".svg") || path.endsWith(".woff") || path.endsWith(".woff2")) {
+                // Only intercept requests destined for our dashboard server
+                if (requestUrl.host != "dashboard.cashlabnyc.com") {
                     return null
                 }
 
-                // Only intercept API calls and the root page — add auth header and pass through
-                if (!path.startsWith("/api/") && path != "/") {
-                    return null
-                }
+                val path = requestUrl.path ?: "/"
+                val method = request.method
 
                 return try {
-                    val conn = URL(url).openConnection() as HttpURLConnection
-                    conn.requestMethod = request.method
+                    val conn = requestUrl.openConnection() as HttpURLConnection
+                    conn.requestMethod = method
                     conn.setRequestProperty("X-App-Auth", "f9711c62b88042dca5266d44ddfb6d14")
                     conn.setRequestProperty("User-Agent", "FireTV/1.0")
-                    conn.connectTimeout = 15000
-                    conn.readTimeout = 15000
+                    conn.connectTimeout = 20000
+                    conn.readTimeout = 20000
                     if (conn is HttpsURLConnection) {
                         conn.sslSocketFactory = this@DashboardActivity.sslContext.socketFactory
                         conn.hostnameVerifier = this@DashboardActivity.hostnameVerifier
                     }
-                    val mimeType = conn.contentType ?: "application/json"
-                    val inputStream: InputStream = conn.inputStream
+
+                    // Pass through request headers the WebView sent (Accept, etc.)
+                    request.requestHeaders?.forEach { (key, value) ->
+                        if (key.isNotEmpty()) conn.setRequestProperty(key, value)
+                    }
+
                     val statusCode = conn.responseCode
                     val reasonPhrase = conn.responseMessage
+
+                    // Build response headers, skipping hop-by-hop headers
                     val responseHeaders = mutableMapOf<String, String>()
-                    conn.headerFields.forEach { (key, values) ->
-                        if (key != null) responseHeaders[key] = values.joinToString(",")
+                    val skipHeaders = setOf("transfer-encoding", "connection", "keep-alive", "upgrade", "proxy-authenticate", "proxy-authorization", "te", "trailers", "host")
+                    conn.headerFields?.forEach { (key, values) ->
+                        if (key != null && key.lowercase() !in skipHeaders && values.isNotEmpty()) {
+                            responseHeaders[key] = values.joinToString(", ")
+                        }
                     }
+
+                    // Determine MIME type from URL path (more reliable than Content-Type for static assets)
+                    val mimeType = when {
+                        path.endsWith(".js") -> "application/javascript"
+                        path.endsWith(".mjs") -> "application/javascript"
+                        path.endsWith(".css") -> "text/css"
+                        path.endsWith(".png") -> "image/png"
+                        path.endsWith(".jpg") || path.endsWith(".jpeg") -> "image/jpeg"
+                        path.endsWith(".webp") -> "image/webp"
+                        path.endsWith(".svg") -> "image/svg+xml"
+                        path.endsWith(".ico") -> "image/x-icon"
+                        path.endsWith(".woff") -> "font/woff"
+                        path.endsWith(".woff2") -> "font/woff2"
+                        path.endsWith(".ttf") -> "font/ttf"
+                        path.endsWith(".json") -> "application/json"
+                        path.endsWith(".xml") -> "application/xml"
+                        path.endsWith(".html") || path == "/" -> "text/html"
+                        conn.contentType?.contains("text/html") == true -> "text/html"
+                        conn.contentType?.contains("application/json") == true -> "application/json"
+                        else -> conn.contentType ?: "application/octet-stream"
+                    }
+
+                    val inputStream: InputStream = if (statusCode >= 400) {
+                        conn.errorStream ?: conn.inputStream
+                    } else {
+                        conn.inputStream
+                    }
+
                     WebResourceResponse(mimeType, null, statusCode, reasonPhrase, responseHeaders, inputStream)
                 } catch (e: Exception) {
+                    e.printStackTrace()
                     null
                 }
             }
