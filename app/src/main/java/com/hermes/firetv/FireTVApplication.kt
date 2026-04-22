@@ -2,31 +2,20 @@ package com.hermes.firetv
 
 import android.app.Application
 import android.util.Log
-import ch.acra.BuildConfig
-import ch.acra.annotation.AcraCore
-import ch.acra.annotation.AcraHttpSender
-import ch.acra.config.CoreConfigurationBuilder
-import ch.acra.config.HttpConfigurationBuilder
-import ch.acra.sender.HttpSender
 
 /**
  * ACRA crash reporting — application class.
  *
- * Reports are JSON-POSTed to a crash relay on the VPS.
- * The relay forwards to Telegram (BOT_TOKEN stored server-side, never in APK).
- * Reports are also spooled to disk if the network is unavailable and
- * sent on the next successful app launch.
+ * ACRA is only active in release builds (isDebuggable=false in buildType).
  *
- * ACRA is only enabled in release builds (see build.gradle.kts).
+ * Configuration is in app/src/main/assets/acra.properties.
+ * Telegram BOT_TOKEN and CHAT_ID are injected by CI into acra.properties
+ * at build time — they never appear in source code.
+ *
+ * Spooling: reports are queued to disk if the network is unavailable and
+ * sent automatically on the next successful app launch.
  */
-@AcraCore(
-    reportFormat = ch.acra.ReportFormat.JSON
-)
-@AcraHttpSender(
-    uri = "https://dashboard.cashlabnyc.com/api/crash",
-    httpMethod = HttpSender.Method.POST,
-    enabled = true
-)
+@org.acra.annotation.AcraCore
 class FireTVApplication : Application() {
 
     companion object {

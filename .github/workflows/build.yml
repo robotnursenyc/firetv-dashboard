@@ -56,14 +56,27 @@ jobs:
             unzip -q gradle.zip
           fi
 
-      # ── Inject auth token into gradle.properties before build ──────────────
-      - name: Inject auth token for release builds
+      # ── Inject secrets into gradle.properties and acra.properties before build ────
+      # Auth token: used in BuildConfig for X-App-Auth header.
+      # Telegram creds: used in acra.properties for crash reporting.
+      - name: Inject secrets for release builds
         run: |
-          # Append to gradle.properties (local.properties takes precedence;
-          # buildConfigField reads from project.ext in build.gradle.kts)
-          # The token is only used in release builds via buildConfigField.
+          # gradle.properties — auth token for BuildConfig
           echo "dashboardAuthToken=${{ secrets.DASHBOARD_AUTH_TOKEN }}" >> $GITHUB_WORKSPACE/gradle.properties
-          echo "Auth token written to gradle.properties (masked in logs)"
+          echo "Auth token written to gradle.properties"
+
+          # acra.properties — Telegram crash reporting credentials
+          # These are NOT hardcoded in source; CI injects them here.
+          cat > $GITHUB_WORKSPACE/app/src/main/assets/acra.properties << 'ACRA_EOF'
+          acra.enable=true
+          acra.reportFormat=JSON
+          acra.unsafeDeviceEncryption=false
+          acra.sender=ch.acra.sender.CoreSender
+          acra.telegram.enabled=true
+          acra.telegram.botToken=${{ secrets.TELEGRAM_BOT_TOKEN }}
+          acra.telegram.chatId=${{ secrets.TELEGRAM_CHAT_ID }}
+          ACRA_EOF
+          echo "acra.properties written (Telegram credentials injected)"
 
       - name: Build release APK
         run: |

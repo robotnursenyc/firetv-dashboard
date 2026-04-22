@@ -82,6 +82,7 @@ dependencies {
     // Annotations on FireTVApplication drive configuration.
     val acraVersion = "5.11.3"
     implementation("ch.acra:acra-core:$acraVersion")
+    implementation("ch.acra:acra-telegram:$acraVersion")
     implementation("ch.acra:acra-mail:$acraVersion")
     implementation("ch.acra:acra-http:$acraVersion")
 }
