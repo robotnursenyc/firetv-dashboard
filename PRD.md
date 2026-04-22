@@ -1,6 +1,6 @@
 # FireTV Dashboard — Product Requirements Document
 
-> **Status:** Build pipeline GREEN. Runtime fixes applied. Awaiting hardware verification.
+> **Status:** Build pipeline GREEN — build 105 succeeded and deployed. Runtime fixes applied. Ready for hardware verification.
 > **Last updated:** 2026-04-22
 > **Owner:** Brian / Hermes Agent
 
