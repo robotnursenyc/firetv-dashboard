@@ -158,22 +158,41 @@ jobs:
           echo "=== Copying signed APK back ==="
           echo "Final APK: $(du -h "$APK_OUT" | cut -f1)"
 
+      - name: Verify signed APK SHA before artifact upload
+        run: |
+          APK="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
+          SIGNED_SHA=$(sha256sum "$APK" | cut -d' ' -f1)
+          echo "SIGNED_APK_SHA=$SIGNED_SHA" >> $GITHUB_ENV
+          echo "SIGNED_APK_SIZE=$(stat -c %s "$APK")" >> $GITHUB_ENV
+          echo "=== Signed APK SHA (will be artifact + deploy input) ==="
+          echo "$SIGNED_SHA  $APK"
+
       - name: Capture APK SHA before upload
         run: |
           APK="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
           echo "APK_PATH=$APK" >> $GITHUB_ENV
-          echo "APK_SHA=$(sha256sum "$APK" | cut -d' ' -f1)" >> $GITHUB_ENV
+          PRE_UPLOAD_SHA=$(sha256sum "$APK" | cut -d' ' -f1)
+          echo "APK_SHA=$PRE_UPLOAD_SHA" >> $GITHUB_ENV
           echo "APK_SIZE=$(stat -c %s "$APK")" >> $GITHUB_ENV
-          echo "=== APK pre-upload SHA ==="
-          echo "SHA: ${{ env.APK_SHA }}"
-          echo "Size: ${{ env.APK_SIZE }} bytes"
+          echo "=== PRE-UPLOAD SHA (this is what CI will deploy) ==="
+          echo "$PRE_UPLOAD_SHA  $APK"
 
       - name: Upload APK as artifact
+        id: artifact-upload
         uses: actions/upload-artifact@v4
         with:
-          name: firetv-release-aligned
+          name: firetv-release-aligned-${{ github.run_number }}
           path: ${{ github.workspace }}/app/build/outputs/apk/release/app-release.apk
           retention-days: 7
+
+      - name: Verify artifact was uploaded with fresh SHA
+        run: |
+          echo "=== Artifact verification ==="
+          echo "Artifact name: firetv-release-aligned-${{ github.run_number }}"
+          echo "Expected APK SHA: ${{ env.APK_SHA }}"
+          echo "Expected size: ${{ env.APK_SIZE }} bytes"
+          echo "Upload step id: ${{ steps.artifact-upload.outputs.artifact-id }}"
+          echo "Upload step url: ${{ steps.artifact-upload.outputs.artifact-url }}"
       # ── Deploy to VPS ────────────────────────────────────────────────────────
       # Strategy: scp APK to host /tmp/, docker cp into container.
       # This avoids all stdin piping complexity — SFTP is a clean file transfer protocol.
