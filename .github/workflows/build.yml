@@ -42,9 +42,11 @@ jobs:
       # Create local.properties so Gradle knows where the Android SDK lives.
       # ANDROID_HOME is set in the env block of the Build step, but the
       # Android Gradle plugin also reads local.properties.
+      # ANDROID_HOME and ANDROID_SDK_ROOT are set by setup-android above.
+      # Do NOT override them here.
       - name: Create local.properties
         run: |
-          echo "sdk.dir=/opt/android-sdk" > $GITHUB_WORKSPACE/local.properties
+          echo "sdk.dir=/usr/local/lib/android/sdk" > $GITHUB_WORKSPACE/local.properties
           echo "Created: $(cat $GITHUB_WORKSPACE/local.properties)"
 
       # ── Inject secrets into gradle.properties and acra.properties before build ────
@@ -72,9 +74,6 @@ jobs:
 
       - name: Build release APK
         continue-on-error: true
-        env:
-          ANDROID_HOME: /opt/android-sdk
-          ANDROID_SDK_ROOT: /opt/android-sdk
         run: |
           echo "=== Java version ==="
           java -version 2>&1
@@ -128,8 +127,6 @@ jobs:
           UPLOAD_KEYSTORE_ALIAS: ${{ secrets.UPLOAD_KEYSTORE_ALIAS }}
           UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}
           UPLOAD_KEY_PASSWORD: ${{ secrets.UPLOAD_KEY_PASSWORD }}
-          ANDROID_HOME: /opt/android-sdk
-          ANDROID_SDK_ROOT: /opt/android-sdk
         run: |
           echo "=== Decoding keystore ==="
           echo "$UPLOAD_KEYSTORE_B64" | base64 -d > /tmp/firetv-upload.jks
