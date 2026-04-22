@@ -1,0 +1,16 @@
+R_DEF: Internal format may change without notice
+local
+color black
+color dark_background
+color white
+drawable app_banner
+drawable exit_button_bg
+drawable ic_launcher_background
+drawable ic_launcher_foreground
+id exitBottomRight
+id exitButtonContainer
+id webView
+layout activity_main
+mipmap ic_launcher
+string app_name
+style Theme.FireTVDashboard

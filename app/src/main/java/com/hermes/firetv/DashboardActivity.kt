@@ -3,9 +3,11 @@ package com.hermes.firetv
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.os.Bundle
+import android.util.Log
 import android.view.View
 import android.view.WindowManager
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -15,6 +17,8 @@ import android.widget.FrameLayout
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import java.io.InputStream
+import java.io.BufferedInputStream
+import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import javax.net.ssl.HostnameVerifier
@@ -29,6 +33,9 @@ class DashboardActivity : AppCompatActivity() {
     private lateinit var webView: WebView
 
     private val DASHBOARD_URL = BuildConfig.DASHBOARD_URL
+    private val AUTH_TOKEN = "f9711c62b88042dca5266d44ddfb6d14"
+
+    private val TAG = "HermesDashboard"
 
     // SSL context that trusts all certs (needed for FireTV + Let's Encrypt)
     private val sslContext: SSLContext by lazy {
@@ -46,6 +53,10 @@ class DashboardActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        Log.d(TAG, "=== DashboardActivity onCreate START ===")
+        Log.d(TAG, "DASHBOARD_URL=$DASHBOARD_URL")
+        Log.d(TAG, "Auth token present: ${AUTH_TOKEN.isNotEmpty()}")
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
@@ -104,11 +115,35 @@ class DashboardActivity : AppCompatActivity() {
         settings.allowContentAccess = false
         webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
 
-        webView.webChromeClient = WebChromeClient()
+        // Chrome client for console logging
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
+                consoleMessage?.let {
+                    val msg = "[${it.sourceId()}:${it.lineNumber()}] ${it.message()}"
+                    when (it.messageLevel()) {
+                        android.webkit.ConsoleMessage.MessageLevel.ERROR -> Log.e(TAG, "CONSOLE ERROR: $msg")
+                        android.webkit.ConsoleMessage.MessageLevel.WARNING -> Log.w(TAG, "CONSOLE WARN: $msg")
+                        else -> Log.d(TAG, "CONSOLE: $msg")
+                    }
+                }
+                return super.onConsoleMessage(consoleMessage)
+            }
 
-        // Intercept ALL requests to the dashboard domain, add auth header, and return with correct MIME type.
-        // Static assets (JS chunks, CSS, images) also need auth — server returns 401 without it.
+            override fun onReceivedTitle(view: WebView?, title: String?) {
+                Log.d(TAG, "Page title: $title")
+            }
+
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                if (newProgress < 100) {
+                    Log.d(TAG, "Loading progress: $newProgress%")
+                } else {
+                    Log.d(TAG, "Loading COMPLETE: 100%")
+                }
+            }
+        }
+
         webView.webViewClient = object : WebViewClient() {
+
             override fun shouldInterceptRequest(
                 view: WebView?,
                 request: WebResourceRequest?
@@ -124,10 +159,12 @@ class DashboardActivity : AppCompatActivity() {
                 val path = requestUrl.path ?: "/"
                 val method = request.method
 
+                Log.d(TAG, "INTERCEPT: ${method} ${path}")
+
                 return try {
                     val conn = requestUrl.openConnection() as HttpURLConnection
                     conn.requestMethod = method
-                    conn.setRequestProperty("X-App-Auth", "f9711c62b88042dca5266d44ddfb6d14")
+                    conn.setRequestProperty("X-App-Auth", AUTH_TOKEN)
                     conn.setRequestProperty("User-Agent", "FireTV/1.0")
                     conn.connectTimeout = 20000
                     conn.readTimeout = 20000
@@ -143,6 +180,8 @@ class DashboardActivity : AppCompatActivity() {
 
                     val statusCode = conn.responseCode
                     val reasonPhrase = conn.responseMessage
+
+                    Log.d(TAG, "RESPONSE: ${statusCode} ${reasonPhrase} for ${path}")
 
                     // Build response headers, skipping hop-by-hop headers
                     val responseHeaders = mutableMapOf<String, String>()
@@ -182,12 +221,34 @@ class DashboardActivity : AppCompatActivity() {
 
                     WebResourceResponse(mimeType, null, statusCode, reasonPhrase, responseHeaders, inputStream)
                 } catch (e: Exception) {
+                    Log.e(TAG, "INTERCEPT EXCEPTION for ${path}: ${e.javaClass.simpleName}: ${e.message}")
                     e.printStackTrace()
                     null
                 }
             }
 
+            override fun onReceivedError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                error: WebResourceError?
+            ) {
+                if (request?.isForMainFrame == true) {
+                    Log.e(TAG, "MAINFRAME ERROR: ${error?.errorCode} - ${error?.description}")
+                }
+            }
+
+            override fun onReceivedHttpError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                errorResponse: WebResourceResponse?
+            ) {
+                if (request?.isForMainFrame == true) {
+                    Log.e(TAG, "MAINFRAME HTTP ERROR: ${errorResponse?.statusCode} - ${errorResponse?.reasonPhrase}")
+                }
+            }
+
             override fun onPageFinished(view: WebView?, url: String?) {
+                Log.d(TAG, "=== Page finished: $url ===")
                 view?.evaluateJavascript(
                     """(function(){if('wakeLock' in navigator){navigator.wakeLock.request('screen').then(function(wl){console.log('Wake Lock acquired');wl.addEventListener('release',function(){console.log('Wake Lock released');});}).catch(function(err){console.error('Wake Lock error:',err);});}})();""",
                     null
@@ -195,11 +256,14 @@ class DashboardActivity : AppCompatActivity() {
             }
         }
 
+        Log.d(TAG, "Loading URL: $DASHBOARD_URL")
         webView.loadUrl(DASHBOARD_URL)
         startService(Intent(this, KeepAwakeService::class.java))
+        Log.d(TAG, "=== DashboardActivity onCreate END ===")
     }
 
     override fun onDestroy() {
+        Log.d(TAG, "onDestroy")
         webView.apply {
             loadUrl("about:blank")
             clearHistory()

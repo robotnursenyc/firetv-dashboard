@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/dark_background">
+
+    <!-- WebView fills the entire screen -->
+    <WebView
+        android:id="@+id/webView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Exit Button 1: On-screen X button, top-right corner -->
+    <FrameLayout
+        android:id="@+id/exitButtonContainer"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_margin="20dp"
+        android:clickable="true"
+        android:focusable="true"
+        android:padding="10dp">
+
+        <!-- Semi-transparent rounded background -->
+        <View
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="@drawable/exit_button_bg" />
+
+        <!-- X symbol -->
+        <TextView
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:gravity="center"
+            android:text="×"
+            android:textColor="#FFFFFFFF"
+            android:textSize="28sp"
+            android:textStyle="bold" />
+
+    </FrameLayout>
+
+    <!-- Exit Button 2: Invisible touch target covering bottom-right corner -->
+    <View
+        android:id="@+id/exitBottomRight"
+        android:layout_width="120dp"
+        android:layout_height="120dp"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="20dp"
+        android:background="@android:color/transparent"
+        android:clickable="true"
+        android:focusable="true" />
+
+</FrameLayout>
