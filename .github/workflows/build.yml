@@ -158,6 +158,16 @@ jobs:
           echo "=== Copying signed APK back ==="
           echo "Final APK: $(du -h "$APK_OUT" | cut -f1)"
 
+      - name: Capture APK SHA before upload
+        run: |
+          APK="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
+          echo "APK_PATH=$APK" >> $GITHUB_ENV
+          echo "APK_SHA=$(sha256sum "$APK" | cut -d' ' -f1)" >> $GITHUB_ENV
+          echo "APK_SIZE=$(stat -c %s "$APK")" >> $GITHUB_ENV
+          echo "=== APK pre-upload SHA ==="
+          echo "SHA: ${{ env.APK_SHA }}"
+          echo "Size: ${{ env.APK_SIZE }} bytes"
+
       - name: Upload APK as artifact
         uses: actions/upload-artifact@v4
         with:
@@ -179,7 +189,9 @@ jobs:
           BUILD_NUM=${GITHUB_RUN_NUMBER:-0}
           LOCAL_APK="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
           echo "=== Deploying firetv-release.apk (build #${BUILD_NUM}) ==="
-          echo "APK size: $(du -h "$LOCAL_APK" | cut -f1)"
+          echo "Deploying SHA: ${{ env.APK_SHA }}"
+          echo "Deploying size: ${{ env.APK_SIZE }} bytes"
+          echo "Expected artifact SHA: ${{ env.APK_SHA }}"
 
           # Step 1: scp APK to host /home/hermes/ (hermes home dir is writable via SFTP)
           echo "=== STEP 1: scp APK to VPS ==="
