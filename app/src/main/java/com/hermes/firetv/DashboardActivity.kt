@@ -16,9 +16,10 @@ import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import java.io.InputStream
 import java.io.BufferedInputStream
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import javax.net.ssl.HostnameVerifier
@@ -213,13 +214,27 @@ class DashboardActivity : AppCompatActivity() {
                         else -> conn.contentType ?: "application/octet-stream"
                     }
 
-                    val inputStream: InputStream = if (statusCode >= 400) {
+                    // Fully buffer the response body BEFORE returning it to WebView.
+                    // Returning a live InputStream causes the JS engine to parse while
+                    // the network is still transferring — truncated chunks crash the parser.
+                    val baos = ByteArrayOutputStream(65536)
+                    val rawStream: InputStream = if (statusCode >= 400) {
                         conn.errorStream ?: conn.inputStream
                     } else {
                         conn.inputStream
                     }
+                    rawStream.use { input ->
+                        val buf = ByteArray(8192)
+                        var read: Int
+                        while (input.read(buf).also { read = it } != -1) {
+                            baos.write(buf, 0, read)
+                        }
+                    }
+                    val bytes = baos.toByteArray()
+                    Log.d(TAG, "  Buffered ${bytes.size} bytes for ${path}")
 
-                    WebResourceResponse(mimeType, null, statusCode, reasonPhrase, responseHeaders, inputStream)
+                    val bufferedInputStream = ByteArrayInputStream(bytes)
+                    WebResourceResponse(mimeType, "UTF-8", statusCode, reasonPhrase, responseHeaders, bufferedInputStream)
                 } catch (e: Exception) {
                     Log.e(TAG, "INTERCEPT EXCEPTION for ${path}: ${e.javaClass.simpleName}: ${e.message}")
                     e.printStackTrace()
