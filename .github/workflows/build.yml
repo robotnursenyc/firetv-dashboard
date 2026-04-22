@@ -164,10 +164,9 @@ jobs:
           name: firetv-release-aligned
           path: ${{ github.workspace }}/app/build/outputs/apk/release/app-release.apk
           retention-days: 7
-
       # ── Deploy to VPS ────────────────────────────────────────────────────────
-      # heredoc-over-SSH: write script directly to container /tmp via docker exec -i
-      # Each step is a separate SSH call (stdin isolation between script write and APK pipe)
+      # Strategy: scp APK to host /tmp/, docker cp into container.
+      # This avoids all stdin piping complexity — SFTP is a clean file transfer protocol.
       - name: Deploy to VPS
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
@@ -182,40 +181,33 @@ jobs:
           echo "=== Deploying firetv-release.apk (build #${BUILD_NUM}) ==="
           echo "APK size: $(du -h "$LOCAL_APK" | cut -f1)"
 
-          # Write deploy script to container /tmp via heredoc-over-SSH
-          # Uses real newlines (YAML | block scalar), not escaped \n
-          # Each command is separate SSH call — no stdin sharing
-          echo "=== STEP 1: write deploy script to container ==="
-          ssh -o StrictHostKeyChecking=no -o BatchMode=yes \
-             -i /tmp/vps_key "$VPS_USER@$VPS_HOST" \
-             'docker exec -i apk-serve sh -c "cat > /tmp/deploy_apk.sh" << '"'"'SCRIPT'"'"'
-#!/bin/sh
-set -e
-cat > /tmp/firetv-release.apk
-cp /tmp/firetv-release.apk /usr/share/nginx/html/apk/firetv-release.apk
-chmod 644 /usr/share/nginx/html/apk/firetv-release.apk
-echo "{\"version\":\"1.0\",\"build\":'"${BUILD_NUM}"',\"apk_url\":\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\"}" > /usr/share/nginx/html/apk/version.json
-echo DEPLOY_OK
-sha256sum /usr/share/nginx/html/apk/firetv-release.apk
-SCRIPT
+          # Step 1: scp APK to host /home/hermes/ (hermes home dir is writable via SFTP)
+          echo "=== STEP 1: scp APK to VPS ==="
+          scp -o StrictHostKeyChecking=no \
+             -i /tmp/vps_key "$LOCAL_APK" \
+             "$VPS_USER@$VPS_HOST:/home/hermes/firetv-release.apk"
           S1_EXIT=$?
           echo "=== STEP 1 exit code: $S1_EXIT ==="
           if [ $S1_EXIT -ne 0 ]; then
-            echo "ERROR: script write failed"
+            echo "ERROR: scp failed"
             exit 1
           fi
 
-          # Pipe APK into the already-written script
-          echo "=== STEP 2: piping APK (size: $(du -h "$LOCAL_APK" | cut -f1)) ==="
-          cat "$LOCAL_APK" | ssh -o StrictHostKeyChecking=no \
+          # Step 2: docker cp into container, write version.json, chmod
+          echo "=== STEP 2: deploy inside container ==="
+          ssh -o StrictHostKeyChecking=no \
              -i /tmp/vps_key "$VPS_USER@$VPS_HOST" \
-             "docker exec -i apk-serve sh /tmp/deploy_apk.sh"
+             "docker cp /home/hermes/firetv-release.apk apk-serve:/tmp/firetv-release.apk && \
+              docker exec apk-serve sh -c '\
+                cp /tmp/firetv-release.apk /usr/share/nginx/html/apk/firetv-release.apk && \
+                chmod 644 /usr/share/nginx/html/apk/firetv-release.apk && \
+                echo \"{\\\"version\\\":\\\"1.0\\\",\\\"build\\\":${BUILD_NUM},\\\"apk_url\\\":\\\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\\\"}\" > /usr/share/nginx/html/apk/version.json && \
+                echo DEPLOY_OK && \
+                sha256sum /usr/share/nginx/html/apk/firetv-release.apk'"
           S2_EXIT=$?
           echo "=== STEP 2 exit code: $S2_EXIT ==="
           if [ $S2_EXIT -ne 0 ]; then
-            echo "ERROR: APK deploy failed"
-            ssh -o StrictHostKeyChecking=no -i /tmp/vps_key "$VPS_USER@$VPS_HOST" \
-               "docker exec apk-serve ls -la /tmp/ 2>&1 || true"
+            echo "ERROR: container deploy failed"
             exit 1
           fi
 
