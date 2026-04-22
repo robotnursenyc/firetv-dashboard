@@ -172,42 +172,35 @@ jobs:
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
         run: |
-          # Write SSH key to disk (0600 required)
           echo "$VPS_SSH_KEY" > /tmp/vps_key
           chmod 600 /tmp/vps_key
 
           BUILD_NUM=${GITHUB_RUN_NUMBER:-0}
-
+          LOCAL_APK="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
           echo "=== Deploying firetv-release.apk (build #${BUILD_NUM}) ==="
+          echo "APK size: $(du -h "$LOCAL_APK" | cut -f1)"
 
-          # hermes cannot write to /tmp/ or /opt/data/home/ on the VPS host,
-          # but CAN write to any path inside containers via docker exec.
-          # Pipe APK over SSH and decode it inside the container directly.
-          # This avoids any host-filesystem write permissions.
-          cat "$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk" | \
-            ssh -o StrictHostKeyChecking=no -i /tmp/vps_key \
-              "$VPS_USER@$VPS_HOST" \
-              "docker exec -i apk-serve sh -c 'cat > /tmp/firetv-release.apk'" || {
-              echo "SSH/docker pipe failed — trying alternate method"
-              # Fallback: copy to host /tmp via docker run (host network + volume)
-              scp -o StrictHostKeyChecking=no -i /tmp/vps_key \
-                "$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk" \
-                "$VPS_USER@$VPS_HOST:/tmp/firetv-release.apk" || {
-                  # Last resort: write via privileged container
-                  docker run --rm --privileged \
-                    -v /tmp/firetv-release.apk:/dest/firetv-release.apk \
-                    alpine cp /dest/firetv-release.apk /dest/firetv-release.apk 2>/dev/null || true
-              }
-          }
+          # hermes user cannot write to host /tmp/ or /opt/data/home/.
+          # Use: cat APK | ssh | docker exec -i  (single SSH connection, atomic)
+          # The entire deploy runs as ONE ssh command — no multi-command shell string.
+          # Both the APK write AND the cp/version.json update happen in one SSH session.
+          cat "$LOCAL_APK" | \
+            ssh -o StrictHostKeyChecking=no -o BatchMode=yes \
+               -i /tmp/vps_key "$VPS_USER@$VPS_HOST" \
+               "docker exec -i apk-serve sh -c 'cat > /tmp/firetv-release.apk' \
+                && docker exec apk-serve sh -c ' \
+                    cp /tmp/firetv-release.apk /usr/share/nginx/html/apk/firetv-release.apk \
+                    && chmod 644 /usr/share/nginx/html/apk/firetv-release.apk \
+                    && echo {\"version\":\"1.0\",\"build\":${BUILD_NUM},\"apk_url\":\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\"} > /usr/share/nginx/html/apk/version.json \
+                    && echo DEPLOY_OK \
+                    && docker exec apk-serve sha256sum /usr/share/nginx/html/apk/firetv-release.apk'"
 
-          # Update the APK and version marker inside the container
-          ssh -o StrictHostKeyChecking=no -i /tmp/vps_key \
-            "$VPS_USER@$VPS_HOST" \
-            "docker exec apk-serve sh -c '
-              cp /tmp/firetv-release.apk /usr/share/nginx/html/apk/firetv-release.apk \&\&
-              chmod 644 /usr/share/nginx/html/apk/firetv-release.apk \&\&
-              echo \"{\\\"version\\\":\\\"1.0\\\",\\\"build\\\":${BUILD_NUM},\\\"apk_url\\\":\\\"https://dashboard.cashlabnyc.com/apk/firetv-release.apk\\\"}\" > /usr/share/nginx/html/apk/version.json
-            ' && echo VPS deploy complete"
+          DEPLOY_STATUS=$?
+          if [ $DEPLOY_STATUS -ne 0 ]; then
+            echo "ERROR: Deploy failed with exit code $DEPLOY_STATUS"
+            exit 1
+          fi
+          echo "=== VPS deploy complete ==="
 
       # NOTE: Telegram build notifications removed — TELEGRAM_BOT_TOKEN secret
       # refers to Brian's personal bot which does not have permission to send
