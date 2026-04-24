@@ -5,6 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Color
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -74,11 +77,15 @@ class DashboardActivity : AppCompatActivity() {
     // ── View references ────────────────────────────────────────────────────────
     private lateinit var webView: WebView
     private lateinit var rootView: FrameLayout
+    private lateinit var loadingOverlay: View
     private lateinit var windowInsetsController: WindowInsetsControllerCompat
 
     // ── Foreground tracking ──────────────────────────────────────────────────
     // Guards onTrimMemory reloads — we only want to reload when actually visible.
     private var isInForeground = false
+
+    // ── Network state ────────────────────────────────────────────────────────
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     // ── Watchdog state ───────────────────────────────────────────────────────
     // Tracks last JS pong — reloaded if no pong for STALE_THRESHOLD_MS.
@@ -94,6 +101,12 @@ class DashboardActivity : AppCompatActivity() {
 
     // Check JS health every this many ms.
     private val WATCHDOG_INTERVAL_MS = 30_000L
+
+    // Hard reload the dashboard every this many ms regardless of JS health.
+    // Flushes accumulated renderer state before it can cause memory pressure.
+    // 5 minutes: frequent enough to prevent long-term heap growth, infrequent
+    // enough to not cause visible flicker on a stable connection.
+    private val PERIODIC_RELOAD_INTERVAL_MS = 5 * 60 * 1_000L
 
     // Require this many consecutive stale observations before declaring the page
     // unresponsive. A single miss can be a transient GC or IPC pause on the 1 GB
@@ -118,6 +131,11 @@ class DashboardActivity : AppCompatActivity() {
 
     private val watchdogRunnable = Runnable { checkJsHealth() }
     private val retryRunnable = Runnable { performReload() }
+    private val periodicReloadRunnable = Runnable {
+        crashLogger.log(TAG, "Periodic reload: flushing renderer state")
+        Log.d(TAG, "Periodic reload triggered")
+        performReload()
+    }
 
     // ── Crash / activity logger ─────────────────────────────────────────────
     private lateinit var crashLogger: CrashLogger
@@ -151,8 +169,10 @@ class DashboardActivity : AppCompatActivity() {
         webView.onResume()
         lastJsPongMs = System.currentTimeMillis()
         scheduleWatchdogCheck()
-        crashLogger.log(TAG, "onResume — WebView resumed, watchdog armed")
-        Log.d(TAG, "onResume — WebView resumed, watchdog armed")
+        schedulePeriodicReload()
+        registerNetworkCallback()
+        crashLogger.log(TAG, "onResume — WebView resumed, watchdog armed, network listener active")
+        Log.d(TAG, "onResume — WebView resumed, watchdog armed, network listener active")
     }
 
     override fun onPause() {
@@ -161,8 +181,10 @@ class DashboardActivity : AppCompatActivity() {
         webView.onPause()
         handler.removeCallbacks(watchdogRunnable)
         handler.removeCallbacks(retryRunnable)
-        crashLogger.log(TAG, "onPause — watchdog disarmed")
-        Log.d(TAG, "onPause — watchdog disarmed")
+        handler.removeCallbacks(periodicReloadRunnable)
+        unregisterNetworkCallback()
+        crashLogger.log(TAG, "onPause — watchdog disarmed, periodic reload cancelled, network listener removed")
+        Log.d(TAG, "onPause — watchdog disarmed, periodic reload cancelled, network listener removed")
     }
 
     override fun onDestroy() {
@@ -170,6 +192,7 @@ class DashboardActivity : AppCompatActivity() {
         Log.d(TAG, "onDestroy")
         handler.removeCallbacks(watchdogRunnable)
         handler.removeCallbacks(retryRunnable)
+        handler.removeCallbacks(periodicReloadRunnable)
         if (::webView.isInitialized) {
             try {
                 webView.stopLoading()
@@ -325,12 +348,6 @@ class DashboardActivity : AppCompatActivity() {
         // must be disabled in Settings → Display & Sounds → Screen Saver → Never.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        // BLOCK screenshots and screen recording — essential for kiosk security.
-        window.setFlags(
-            WindowManager.LayoutParams.FLAG_SECURE,
-            WindowManager.LayoutParams.FLAG_SECURE
-        )
-
         // Immersive sticky — hides the system navigation and status bars.
         WindowCompat.setDecorFitsSystemWindows(window, false)
         windowInsetsController = WindowInsetsControllerCompat(window, window.decorView)
@@ -352,6 +369,34 @@ class DashboardActivity : AppCompatActivity() {
             )
             setBackgroundColor(Color.parseColor("#121212"))
         }
+
+        // Loading overlay — shown during initial page load, fades out on first paint.
+        // Prevents the black-screen-of-nothing visible between app launch and first frame.
+        loadingOverlay = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+            setBackgroundColor(Color.parseColor("#121212"))
+            isFocusable = false
+            isClickable = false
+
+            // Centered loading indicator
+            addView(TextView(context).apply {
+                text = "Loading dashboard…"
+                setTextColor(Color.WHITE)
+                textSize = 18f
+                gravity = android.view.Gravity.CENTER
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    gravity = android.view.Gravity.CENTER
+                }
+            })
+        }
+        rootView.addView(loadingOverlay)
+        loadingOverlay.alpha = 1f
 
         // WebView — fills entire screen.
         webView = WebView(this).apply {
@@ -582,6 +627,7 @@ class DashboardActivity : AppCompatActivity() {
                 isRetryPending = false
                 crashLogger.log(TAG, "Page finished: $url")
                 Log.d(TAG, "Page finished: $url")
+                hideLoadingOverlay()
                 injectJsHealthCheck()
             }
 
@@ -755,6 +801,7 @@ class DashboardActivity : AppCompatActivity() {
                 isRetryPending = false
                 crashLogger.log(TAG, "Page finished (after crash recovery): $url")
                 Log.d(TAG, "Page finished (after crash recovery): $url")
+                hideLoadingOverlay()
                 injectJsHealthCheckInto(freshWebView)
             }
             override fun onRenderProcessGone(
@@ -1002,6 +1049,108 @@ class DashboardActivity : AppCompatActivity() {
         handler.postDelayed(watchdogRunnable, WATCHDOG_INTERVAL_MS)
     }
 
+    private fun showLoadingOverlay() {
+        if (!::loadingOverlay.isInitialized) return
+        loadingOverlay.visibility = View.VISIBLE
+        loadingOverlay.alpha = 1f
+    }
+
+    /**
+     * Fades out the loading overlay once the dashboard has painted its first frame.
+     * The fade prevents a hard visual cut from loading text to dashboard content.
+     */
+    private fun hideLoadingOverlay() {
+        if (!::loadingOverlay.isInitialized) return
+        if (loadingOverlay.alpha < 0.01f) return  // already hidden
+
+        loadingOverlay.animate()
+            .alpha(0f)
+            .setDuration(300)
+            .withEndAction {
+                loadingOverlay.visibility = View.GONE
+                loadingOverlay.alpha = 1f  // reset for next use
+            }
+            .start()
+    }
+
+    private fun schedulePeriodicReload() {
+        handler.removeCallbacks(periodicReloadRunnable)
+        handler.postDelayed(periodicReloadRunnable, PERIODIC_RELOAD_INTERVAL_MS)
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // NETWORK CHANGE LISTENER
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Registers a NetworkCallback to detect connectivity changes.
+     * When the device regains network access (WiFi back online), we force a
+     * fresh dashboard load via shouldInterceptRequest so the auth header is
+     * re-injected. Without this, the WebView would stay stuck on the last
+     * state after a network outage with no recovery trigger.
+     *
+     * Registered in onResume, unregistered in onPause — safe across config
+     * changes and does not leak on activity destroy.
+     */
+    private fun registerNetworkCallback() {
+        if (networkCallback != null) return  // already registered
+
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+        networkCallback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                crashLogger.log(TAG, "Network available — reloading dashboard")
+                Log.d(TAG, "Network available — reloading dashboard")
+                handler.post {
+                    if (!isFinishing && ::webView.isInitialized) {
+                        // Reset error state so the reload doesn't immediately
+                        // hit the error overlay if we had 9 consecutive failures.
+                        consecutiveErrors = 0
+                        missedPongs = 0
+                        isRetryPending = false
+                        handler.removeCallbacks(retryRunnable)
+                        loadDashboardWithAuth()
+                    }
+                }
+            }
+
+            override fun onLost(network: Network) {
+                crashLogger.log(TAG, "Network lost")
+                Log.d(TAG, "Network lost")
+            }
+
+            override fun onCapabilitiesChanged(
+                network: Network,
+                capabilities: NetworkCapabilities
+            ) {
+                val connected = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                crashLogger.log(TAG, "Network capabilities changed — internet: $connected")
+            }
+        }
+
+        try {
+            cm.registerDefaultNetworkCallback(networkCallback!!)
+            crashLogger.log(TAG, "Network callback registered")
+        } catch (e: Exception) {
+            crashLogger.log(TAG, "Failed to register network callback: ${e.message}", e)
+            Log.e(TAG, "Failed to register network callback: ${e.message}", e)
+            networkCallback = null
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        networkCallback?.let { cb ->
+            try {
+                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                cm.unregisterNetworkCallback(cb)
+                crashLogger.log(TAG, "Network callback unregistered")
+            } catch (e: Exception) {
+                crashLogger.log(TAG, "Error unregistering network callback: ${e.message}", e)
+            }
+            networkCallback = null
+        }
+    }
+
     @JavascriptInterface
     fun pong() {
         lastJsPongMs = System.currentTimeMillis()
@@ -1121,6 +1270,7 @@ class DashboardActivity : AppCompatActivity() {
         isRetryPending = false
         crashLogger.log(TAG, "performReload: reloading (error #$consecutiveErrors)")
         Log.d(TAG, "performReload: reloading (error #$consecutiveErrors)")
+        showLoadingOverlay()
         loadDashboardWithAuth()
     }
 
