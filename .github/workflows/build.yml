@@ -104,7 +104,7 @@ jobs:
         id: artifact-upload
         uses: actions/upload-artifact@v4
         with:
-          name: firetv-release-aligned-${{ github.run_number }}
+          name: firetv-release-aligned-${{ github.run_number }}-${{ github.run_id }}
           path: ${{ github.workspace }}/app/build/outputs/apk/release/app-release.apk
           retention-days: 3
 
